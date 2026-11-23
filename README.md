@@ -1,3 +1,1 @@
-"# EBSSummariser" 
-
-Test
+"# EBSSummariser"
