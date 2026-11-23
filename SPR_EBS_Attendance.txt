@@ -1,0 +1,314 @@
+CREATE OR ALTER PROCEDURE SPR_EBS_Attendance
+AS
+BEGIN
+	SET XACT_ABORT, NOCOUNT ON;
+	SET DATEFORMAT ymd
+
+	DECLARE @AcademicYear VARCHAR(5)
+
+	SET @AcademicYear = (
+		SELECT
+			CFG.Value
+		FROM Config CFG
+		WHERE
+			CFG.ConfigID = 'EBS_AcademicYearID'
+	)
+
+	--Session code may be the same as academic year or can otherwise be derived from that
+	DECLARE @SessionCode VARCHAR(9) = @AcademicYear
+
+	--Get Current Year Dates
+	DROP TABLE IF EXISTS #CurrentYear
+	SELECT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		YrStart = FY.START_DATE,
+		YrEnd = FY.END_DATE
+	INTO #CurrentYear
+	FROM ebs.dbo.FUNDING_YEARS FY
+	WHERE
+		CAST ( FY.START_DATE AS DATE ) <= '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31'
+		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
+
+
+	--Attendance Info
+	DROP TABLE IF EXISTS #Attend
+	SELECT
+		AcademicYearID = CY.AcademicYear,
+		RefreshDate = GETDATE(),
+		LearnRefNumber = P.PERSON_CODE,
+		LearnRefNumberILR = COALESCE ( P.FES_SEC_PERSON_CODE, CAST ( P.PERSON_CODE AS VARCHAR(50) ) ),
+		Surname = P.SURNAME,
+		Forename = P.FORENAME,
+		CourseID = UIO.UIO_ID,
+		CourseCode = UIO.FES_UINS_INSTANCE_CODE,
+		CourseTitle = UIO.LONG_DESCRIPTION,
+		StartDate = UIO.FES_START_DATE,
+		EndDate = UIO.FES_END_DATE,
+		EnrolmentID = ENR.EnrolmentID,
+		SoftwareSupplierAimID = ENR.SoftwareSupplierAimID,
+		GroupID = U.TUTORGROUP_ID,
+		GroupCode = TUT.NAME,
+		RegisterID = RE.ID,
+		RegisterEventTypeCode = RE.EVENT_TYPE,
+		RegisterCode = RE.EVENT_CODE,
+		RegisterName = RE.DESCRIPTION,
+		RegisterSessionID = RES.ID,
+		SessionDate = CAST ( RES.STARTDATE AS DATE ),
+		SessionStartTime = RES.STARTDATE,
+		SessionEndTime = RES.ENDDATE,
+		SessionBreak = RES.[BREAK],
+		DurationIncBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ),
+		DurationExcBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ) - RES.[BREAK],
+		PlannedSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '' ) = '~' THEN 0 -- Ignore neutral marks
+				ELSE 1
+			END,
+		PossibleSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '~' ) = '~' THEN 0 -- Ignore neutral marks
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) THEN 1
+				ELSE 0
+			END,
+		AttendedSession = 
+			CASE 
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'Y' THEN 1
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'N' THEN 0
+				ELSE 0
+			END,
+		AttendedOrFutureSession = 
+			CASE 
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'Y' THEN 1
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'N' THEN 0
+				ELSE 1
+			END,
+		LateToSession =
+			CASE 
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_LATE = 'Y' THEN 1
+				WHEN CAST ( RES.STARTDATE AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_LATE = 'N' THEN 0
+				ELSE 0
+			END,
+		NeutralSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '' ) = '~' THEN 1
+				ELSE 0
+			END
+		INTO #Attend
+	FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+	INNER JOIN #CurrentYear CY
+		ON 1 = 1
+	INNER JOIN ebs.dbo.FUNDING_YEARS FY
+		ON FY.FUNDING_YEAR = CY.FundingYear
+	INNER JOIN ebs.dbo.UNIT_INSTANCES UI
+		ON UI.FES_UNIT_INSTANCE_CODE = UIO.FES_UINS_INSTANCE_CODE
+	INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+		ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS U
+		ON U.OBJECT_ID = UIO.UIO_ID
+		AND U.DETAIL_STATUS = 'A'
+		AND U.OBJECT_TYPE = 'U'
+	INNER JOIN ebs.dbo.REGISTER_EVENTS RE
+		ON RE.ID = U.REGISTER_EVENT_ID
+	INNER JOIN ebs.dbo.EVENT_TYPES EVT
+		ON EVT.EVENT_TYPE = RE.EVENT_TYPE
+	INNER JOIN ebs.dbo.SESSIONS SES
+		ON SES.SESSION_CODE = RE.SESSION_CODE
+	INNER JOIN ebs.dbo.REGISTER_EVENT_SLOTS RES
+		ON RES.REGISTER_EVENT_ID = RE.ID
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS_SLOTS US
+		ON US.REGISTER_EVENT_DETAIL_ID = U.ID
+		AND US.OBJECT_TYPE = 'U'
+		AND US.REGISTER_EVENT_SLOT_ID = RES.ID
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS L
+		ON L.REGISTER_EVENT_ID = RE.ID
+		AND L.DETAIL_STATUS = 'A'
+		AND L.OBJECT_TYPE = 'L'
+	INNER JOIN ebs.dbo.PEOPLE P
+		ON P.PERSON_CODE = L.OBJECT_ID
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS_SLOTS LS
+		ON LS.REGISTER_EVENT_DETAIL_ID = L.ID
+		AND LS.OBJECT_TYPE = 'L'
+		AND LS.REGISTER_EVENT_SLOT_ID = RES.ID
+	LEFT JOIN ebs.dbo.USAGES USG
+		ON USG.USAGE_CODE = LS.USAGE_CODE
+		AND USG.OBJECT_TYPE = 'L'
+	LEFT JOIN (
+		SELECT
+			RegisterEventID = RE.ID,
+			PersonCode = PU.PERSON_CODE,
+			CourseID = PU.UIO_ID,
+			EnrolmentID = PU.ID,
+			GroupID = PUTG.TUTORGROUP_ID,
+			SoftwareSupplierAimID = LA.SW_SUP_AIM_ID,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						RE.ID,
+						L.OBJECT_ID --May be attached to multiple courses on same register - ensure only one is picked to avoid double counting slots
+						--U.OBJECT_ID,
+						--PUTG.TUTORGROUP_ID
+					ORDER BY
+						CASE
+							WHEN PU.PROGRESS_STATUS = 'A' THEN 1
+							WHEN PU.PROGRESS_STATUS = 'F' THEN 2
+							WHEN PU.PROGRESS_STATUS = 'W' THEN 3
+							WHEN PU.PROGRESS_STATUS = 'T' THEN 4
+							ELSE 5
+						END,
+						U.OBJECT_ID DESC
+				)
+		FROM ebs.dbo.REGISTER_EVENTS RE
+		INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS U
+			ON U.REGISTER_EVENT_ID = RE.ID
+			AND U.DETAIL_STATUS = 'A'
+			AND U.OBJECT_TYPE = 'U'
+		INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS L
+			ON L.REGISTER_EVENT_ID = RE.ID
+			AND L.DETAIL_STATUS = 'A'
+			AND L.OBJECT_TYPE = 'L'
+		INNER JOIN ebs.dbo.PEOPLE_UNITS PU
+			ON PU.PERSON_CODE = L.OBJECT_ID
+			AND PU.UIO_ID = U.OBJECT_ID
+		LEFT JOIN ebs.dbo.PEOPLE_UNIT_TUTORGROUPS PUTG
+			ON PUTG.PEOPLE_UNITS_ID = PU.ID
+		LEFT JOIN ebs.dbo.TUTORGROUPS TUT
+			ON TUT.ID = PUTG.TUTORGROUP_ID
+		LEFT JOIN ebs.dbo.LEARNER_AIMS LA
+			ON LA.RUL_CODE = PU.ID
+		WHERE
+			RE.SESSION_CODE = @SessionCode
+	) ENR
+		ON ENR.RegisterEventID = RE.ID
+		AND ENR.PersonCode = P.PERSON_CODE
+		AND ENR.CourseID = UIO.UIO_ID
+		AND COALESCE ( ENR.GroupID, 0 ) = COALESCE ( U.TUTORGROUP_ID, 0 )
+		AND ENR.RowNum = 1
+	LEFT JOIN ebs.dbo.TUTORGROUPS TUT
+		ON TUT.ID = ENR.GroupID
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = UQA.ID,
+			AimFundingYear = UQA.FUNDING_YEAR,
+			AimCourseID = UQA.UIO_ID,
+			AimIsDefault = UQA.DEFAULT_QA,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						UQA.FUNDING_YEAR,
+						UQA.UIO_ID
+					ORDER BY
+						UQA.DEFAULT_QA DESC
+				)
+		FROM ebs.dbo.UIO_QUAL_AIMS UQA
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		WHERE 
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) UQAM
+		ON UQAM.AimCourseID = UIO.UIO_ID
+		AND UQAM.AimFundingYear = FY.FUNDING_YEAR
+		AND UQAM.RowNum = 1
+	LEFT JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+		ON UQA.ID = UQAM.AimID
+	LEFT JOIN ebs.dbo.FEFC_QUAL_AIMS FQA
+		ON FQA.QUAL_CODE = UQA.QUAL_CODE
+		AND FQA.FUNDING_YEAR = UQA.FUNDING_YEAR
+	WHERE
+		(
+			--Dates span current year
+			COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+			AND COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) >= CAST ( CY.YrStart AS DATE )
+		
+		)
+		--Exclude dummy courses with 10 year durations
+		AND CEILING ( CAST ( DATEDIFF ( MONTH, UIO.FES_START_DATE, UIO.FES_END_DATE ) AS FLOAT ) / CAST ( 12 AS FLOAT ) ) < 10
+		--1st Years Only
+		--AND NOT COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) >= CAST ( CY.YrStart AS DATE )
+		AND RE.SESSION_CODE = @SessionCode
+		--Attached to group via register or enrolled to course
+		AND ENR.PersonCode IS NOT NULL --Has to be enrolled
+		--AND RE.ID = 44338
+		--AND P.PERSON_CODE = 115516
+
+--Delete Existing Data for Academic Year
+	DELETE ATT
+	FROM EBSReporting.dbo.Attendance ATT
+	WHERE
+		ATT.AcademicYearID = @AcademicYear
+
+	--DROP TABLE IF EXISTS EBSReporting.dbo.Attendance
+
+	--Main Query
+	INSERT INTO EBSReporting.dbo.Attendance
+	SELECT
+		ATT.AcademicYearID,
+		ATT.RefreshDate,
+		ATT.LearnRefNumber,
+		ATT.LearnRefNumberILR,
+		ATT.CourseID,
+		ATT.CourseCode,
+		ATT.StartDate,
+		ATT.EndDate,
+		ATT.EnrolmentID,
+		ATT.SoftwareSupplierAimID,
+		ATT.GroupID,
+		ATT.GroupCode,
+		ATT.RegisterID,
+		ATT.RegisterEventTypeCode,
+		ATT.RegisterCode,
+		ATT.RegisterName,
+		ATT.RegisterSessionID,
+		ATT.SessionDate,
+		ATT.SessionStartTime,
+		ATT.SessionEndTime,
+		ATT.SessionBreak,
+		ATT.DurationIncBreaks,
+		ATT.DurationExcBreaks,
+		ATT.PlannedSession,
+		ATT.PossibleSession,
+		ATT.AttendedSession,
+		ATT.AttendedOrFutureSession,
+		ATT.LateToSession,
+		ATT.NeutralSession
+		/*AttendPercent = 
+			ROUND (
+				CASE
+					WHEN SUM ( ATT.PossibleSession) = 0 THEN 0
+					ELSE 
+						CAST ( SUM ( ATT.AttendedSession ) AS FLOAT )
+						/
+						CAST ( SUM ( ATT.PossibleSession ) AS FLOAT )
+				END,
+				3
+			),
+		PunctualityPercent = 
+		ROUND (
+			1 - (
+				CASE
+					WHEN SUM ( ATT.AttendedSession ) = 0 THEN 0
+					ELSE 
+						CAST ( SUM ( ATT.LateToSession ) AS FLOAT )
+						/
+						CAST ( SUM ( ATT.AttendedSession ) AS FLOAT )
+				END
+			),
+			3
+		)*/
+		--INTO EBSReporting.dbo.Attendance
+	FROM #Attend ATT
+
+
+	--Add Indexes
+	--ALTER TABLE EBSReporting.dbo.Attendance
+	--	ALTER COLUMN AcademicYearID VARCHAR(5) NOT NULL
+
+	--ALTER TABLE EBSReporting.dbo.Attendance
+	--	ALTER COLUMN CourseID INT NOT NULL;
+
+	--ALTER TABLE EBSReporting.dbo.Attendance
+	--	ADD CONSTRAINT PK_Attendance_RegisterSessionID PRIMARY KEY CLUSTERED (AcademicYearID, RegisterSessionID, LearnRefNumber);
+END

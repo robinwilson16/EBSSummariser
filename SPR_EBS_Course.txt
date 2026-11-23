@@ -1,0 +1,574 @@
+CREATE OR ALTER PROCEDURE SPR_EBS_Course
+AS
+BEGIN
+	SET XACT_ABORT, NOCOUNT ON;
+	SET DATEFORMAT ymd
+
+	DECLARE @AcademicYear VARCHAR(5)
+
+	SET @AcademicYear = (
+		SELECT
+			CFG.Value
+		FROM Config CFG
+		WHERE
+			CFG.ConfigID = 'EBS_AcademicYearID'
+	)
+
+	--Get Current Year Dates
+	DROP TABLE IF EXISTS #CurrentYear
+	SELECT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		YrStart = FY.START_DATE,
+		YrEnd = FY.END_DATE
+	INTO #CurrentYear
+	FROM ebs.dbo.FUNDING_YEARS FY
+	WHERE
+		CAST ( FY.START_DATE AS DATE ) <= '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31'
+		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
+
+
+
+	--Course Data
+	DROP TABLE IF EXISTS #Courses
+	SELECT
+		AcademicYearID = @AcademicYear,
+		RefreshDate = GETDATE(),
+		ParentChildFacultyCode = COALESCE ( PUIO.OWNING_ORGANISATION, UIO.OWNING_ORGANISATION ),
+		ParentChildFacultyName = COALESCE ( PFAC.FES_FULL_NAME, FAC.FES_FULL_NAME ),
+		ParentChildFacultyHeadStaffCode = COALESCE ( PFACO.FES_STAFF_CODE, FACO.FES_STAFF_CODE ),
+		ParentChildFacultyHeadSurname = COALESCE ( PFACO.SURNAME, FACO.SURNAME ),
+		ParentChildFacultyHeadForename = COALESCE ( PFACO.FORENAME, FACO.FORENAME ),
+		ParentChildFacultyHeadName = COALESCE ( PFACO.FORENAME + ' ' + PFACO.SURNAME + ' (' + PFACO.FES_STAFF_CODE + ')', FACO.FORENAME + ' ' + FACO.SURNAME + ' (' + FACO.FES_STAFF_CODE + ')' ),
+		ParentChildTeamCode = COALESCE ( PUIO.OFFERING_ORGANISATION, UIO.OFFERING_ORGANISATION ),
+		ParentChildTeamName = COALESCE ( PTEAM.FES_FULL_NAME, TEAM.FES_FULL_NAME ),
+		ParentChildTeamFinanceCode = COALESCE ( PTEAM.BTEC_CENTRE, TEAM.BTEC_CENTRE ),
+		ParentChildTeamHeadStaffCode = COALESCE ( PTEAMO.FES_STAFF_CODE, TEAMO.FES_STAFF_CODE ),
+		ParentChildTeamHeadSurname = COALESCE ( PTEAMO.SURNAME, TEAMO.SURNAME ),
+		ParentChildTeamHeadForename = COALESCE ( PTEAMO.FORENAME, TEAMO.FORENAME ),
+		ParentChildTeamHeadName = COALESCE ( PTEAMO.FORENAME + ' ' + PTEAMO.SURNAME + ' (' + PTEAMO.FES_STAFF_CODE + ')', TEAMO.FORENAME + ' ' + TEAMO.SURNAME + ' (' + TEAMO.FES_STAFF_CODE + ')' ),
+		ParentChildStudyLocationCode = COALESCE ( PUIO.SLOC_LOCATION_CODE, UIO.SLOC_LOCATION_CODE ),
+		ParentChildStudyLocationName = COALESCE ( PLOC.FES_LONG_DESCRIPTION, LOC.FES_LONG_DESCRIPTION ),
+		ParentFacultyCode = PUIO.OWNING_ORGANISATION,
+		ParentFacultyName = PFAC.FES_FULL_NAME,
+		ParentFacultyHeadStaffCode = PFACO.FES_STAFF_CODE,
+		ParentFacultyHeadSurname = PFACO.SURNAME,
+		ParentFacultyHeadForename = PFACO.FORENAME,
+		ParentFacultyHeadName = PFACO.FORENAME + ' ' + PFACO.SURNAME + ' (' + PFACO.FES_STAFF_CODE + ')',
+		ParentTeamCode = PUIO.OFFERING_ORGANISATION,
+		ParentTeamName = PTEAM.FES_FULL_NAME,
+		ParentTeamFinanceCode = PTEAM.BTEC_CENTRE,
+		ParentTeamHeadStaffCode = PTEAMO.FES_STAFF_CODE,
+		ParentTeamHeadSurname = PTEAMO.SURNAME,
+		ParentTeamHeadForename = PTEAMO.FORENAME,
+		ParentTeamHeadName = PTEAMO.FORENAME + ' ' + PTEAMO.SURNAME + ' (' + PTEAMO.FES_STAFF_CODE + ')',
+		ParentStudyLocationCode = PUIO.SLOC_LOCATION_CODE,
+		ParentStudyLocationName = PLOC.FES_LONG_DESCRIPTION,
+		ParentRowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					UIO.UIO_ID
+				ORDER BY
+					PUIO.UIO_ID
+			),
+		FacultyCode = UIO.OWNING_ORGANISATION,
+		FacultyName = FAC.FES_FULL_NAME,
+		FacultyHeadStaffCode = FACO.FES_STAFF_CODE,
+		FacultyHeadSurname = FACO.SURNAME,
+		FacultyHeadForename = FACO.FORENAME,
+		FacultyHeadName = FACO.FORENAME + ' ' + FACO.SURNAME + ' (' + FACO.FES_STAFF_CODE + ')',
+		TeamCode = UIO.OFFERING_ORGANISATION,
+		TeamName = TEAM.FES_FULL_NAME,
+		TeamFinanceCode = TEAM.BTEC_CENTRE,
+		TeamHeadStaffCode = TEAMO.FES_STAFF_CODE,
+		TeamHeadSurname = TEAMO.SURNAME,
+		TeamHeadForename = TEAMO.FORENAME,
+		TeamHeadName = TEAMO.FORENAME + ' ' + TEAMO.SURNAME + ' (' + TEAMO.FES_STAFF_CODE + ')',
+		StudyLocationCode = UIO.SLOC_LOCATION_CODE,
+		StudyLocationName = LOC.FES_LONG_DESCRIPTION,
+		SSA1Code = FQA.SSA_TIER1_CODE,
+		SSA1Name = RIGHT ( '00' + FQA.SSA_TIER1_CODE, 2 ) + ' - ' + FQA.SSA_TIER1_DESCRIPTION,
+		SSA2Code = FQA.SSA_TIER2_CODE,
+		SSA2Name = RIGHT ( '00' + FQA.SSA_TIER2_CODE, 4 ) + ' - ' + FQA.SSA_TIER2_DESCRIPTION,
+		ParentID = UI.UI_ID,
+		ParentTitle = UI.FULL_DESCRIPTION,
+		ParentChildCourseID = COALESCE ( PUIO.UIO_ID, UIO.UIO_ID ),
+		ParentChildCourseCode = COALESCE ( PUIO.FES_UINS_INSTANCE_CODE, UIO.FES_UINS_INSTANCE_CODE ),
+		ParentChildCourseTitle = COALESCE ( PUIO.LONG_DESCRIPTION, UIO.LONG_DESCRIPTION ),
+		ParentChildOccurrenceCode = COALESCE ( PUIO.CALOCC_OCCURRENCE_CODE, UIO.CALOCC_OCCURRENCE_CODE ),
+		ParentCourseID = PUIO.UIO_ID,
+		ParentCourseCode = PUIO.FES_UINS_INSTANCE_CODE,
+		ParentCourseTitle = PUIO.LONG_DESCRIPTION,
+		ParentOccurrenceCode = PUIO.CALOCC_OCCURRENCE_CODE,
+		CourseID = UIO.UIO_ID,
+		CourseCode = UIO.FES_UINS_INSTANCE_CODE,
+		CourseTitle = UIO.LONG_DESCRIPTION,
+		OccurrenceCode = UIO.CALOCC_OCCURRENCE_CODE,
+		NumGroups = COALESCE ( GRP.NumGroups, 1 ),
+		CourseStatusCode = UIO.STATUS,
+		CourseStatusName = STA.DESCRIPTION,
+		LearnAimRef = UQA.QUAL_CODE,
+		LearnAimTitle = FQA.DESCRIPTION,
+		CourseType = 
+			CASE
+				WHEN FQA.QUAL_TYPE IN ( '0003', '1439' ) AND FQA.DESCRIPTION LIKE '%Math%' THEN 'Maths'
+				WHEN FQA.QUAL_TYPE IN ( '0003', '1439' ) AND FQA.DESCRIPTION LIKE '%English%' THEN 'English'
+				WHEN UQA.QUAL_CODE IS NULL THEN 'Additionality'
+				WHEN UQA.PROG_TYPE = '31' AND UQA.QUAL_CODE = 'ZPROG001' THEN 'Main Aim'
+				WHEN UQA.QUAL_CODE = 'ZPROG001' THEN 'App Standard'
+				WHEN UQA.QUAL_CODE LIKE 'ZWRKX%' THEN 'App Work Placement'
+				WHEN UQA.QUAL_CODE LIKE 'ZTLOS%' THEN 'App Occupational Specialism'
+				WHEN UQA.QUAL_CODE LIKE 'Z000%' THEN 'Non-Regulated Aim'
+				ELSE 'Main Aim'
+			END,
+		IsSubcontracted = 
+			CASE
+				WHEN FAC.ORGANISATION_CODE = 'PART' THEN 'Y'
+				ELSE 'N'
+			END,
+		SubcontractorName = 
+			CASE
+				WHEN FAC.ORGANISATION_CODE = 'PART' THEN REPLACE ( TEAM.FES_FULL_NAME, 'Partnerships - ', '' )
+				ELSE NULL
+			END,
+		AwardBody = FQA.AWARD_BODY_1,
+		LearningAimTypeCode = FQA.QUAL_TYPE,
+		LearningAimTypeName = FQA.QUAL_TYPE_DESCRIPTION,
+		QualTypeCode = UI.FES_QUALIFICATION_TYPE,
+		QualTypeName = QT.FES_LONG_DESCRIPTION,
+		SourceOfFinanceCode = UI.FES_SOURCE_FINANCE,
+		SourceOfFinanceName = FT.FES_LONG_DESCRIPTION,
+		ModeOfAttendanceCode = UIO.FES_MOA_CODE,
+		ModeOfAttendanceName = MOA.FES_LONG_DESCRIPTION,
+		CourseStartDate = COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ),
+		CourseEndDate = COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ),
+		IncludeInILR = 
+			CASE
+				WHEN UQA.QUAL_CODE IS NOT NULL THEN 'Y'
+				ELSE 'N'
+			END,
+		FirstYear = 
+			CASE
+				WHEN COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) >= CAST ( CY.YrStart AS DATE ) THEN 'Y'
+				ELSE 'N'
+			END,
+		YearNum = 
+			DATEDIFF (
+				YEAR,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ), 8, 1)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) - 1, 8, 1)
+				END,
+				CY.YrStart
+			),
+		OfYears = 
+			DATEDIFF (
+				YEAR,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ), 8, 1)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) - 1, 8, 1)
+				END,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) + 1, 7, 31)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ), 7, 31)
+				END
+			),
+		FundStream = UQA.FE_HE_FUNDED,
+		FundSource = UQA.MAJOR_FUND_SOURCE,
+		FundModelCode = 
+			CASE
+				WHEN UQA.FE_HE_FUNDED = '25' AND UQA.PROG_TYPE IN ( '30', '31' ) THEN 'TLevel'
+				WHEN UQA.FE_HE_FUNDED = '25' THEN '16-19'
+				WHEN UQA.FE_HE_FUNDED = '36' THEN 'App' --Standard
+				WHEN UQA.FE_HE_FUNDED IN ( '35', '36' ) AND UQA.PROG_TYPE = '25' THEN 'App' --Standard
+				WHEN UQA.FE_HE_FUNDED IN ( '35', '36' ) AND UQA.PROG_TYPE IS NOT NULL THEN 'App' --Framework
+				WHEN FQA.NOTIONAL_LEVEL_V2_CODE IN ( '4', '5', '6', '7', '8' ) THEN 'HE-Other'
+				WHEN UQA.FE_HE_FUNDED = '35' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'AEB-ESFA'
+				WHEN UQA.FE_HE_FUNDED = '35' THEN 'AEB-Dev'
+				WHEN UQA.FE_HE_FUNDED = '38' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'ASF-ESFA'
+				WHEN UQA.FE_HE_FUNDED = '38' THEN 'ASF-Dev'
+				WHEN UQA.MAJOR_FUND_SOURCE = '1' THEN 'HE-HEFCE'
+				WHEN QT.FES_LONG_DESCRIPTION LIKE 'Higher Education%' THEN 'HE-Fran'
+				WHEN UQA.FE_HE_FUNDED = '10' THEN 'ComLearn'
+				WHEN UQA.FE_HE_FUNDED = '11' THEN 'TailoredLearn'
+				WHEN UQA.FE_HE_FUNDED = '99' THEN 'NoFund'
+			END,
+		FundModelName = 
+			CASE
+				WHEN UQA.FE_HE_FUNDED = '25' AND UQA.PROG_TYPE IN ( '30', '31' ) THEN 'T Level'
+				WHEN UQA.FE_HE_FUNDED = '25' THEN '16-19 Students (inc. High Needs)'
+				WHEN UQA.FE_HE_FUNDED = '36' THEN 'Apprenticeship'
+				WHEN UQA.FE_HE_FUNDED IN ( '35', '36' ) AND UQA.PROG_TYPE = '25' THEN 'Apprenticeship'
+				WHEN UQA.FE_HE_FUNDED IN ( '35', '36' ) AND UQA.PROG_TYPE IS NOT NULL THEN 'Apprenticeship'
+				WHEN FQA.NOTIONAL_LEVEL_V2_CODE IN ( '4', '5', '6', '7', '8' ) THEN 'HE - Non-Prescribed'
+				WHEN UQA.FE_HE_FUNDED = '35' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'AEB Adult - ESFA'
+				WHEN UQA.FE_HE_FUNDED = '35' THEN 'AEB Adult - Devolved'
+				WHEN UQA.FE_HE_FUNDED = '38' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'ASF Adult - ESFA'
+				WHEN UQA.FE_HE_FUNDED = '38' THEN 'ASF Adult - Devolved'
+				WHEN UQA.MAJOR_FUND_SOURCE = '1' THEN 'HE - HEFCE'
+				WHEN QT.FES_LONG_DESCRIPTION LIKE 'Higher Education%' THEN 'HE - Franchised'
+				WHEN UQA.FE_HE_FUNDED = '10' THEN 'Community Learning'
+				WHEN UQA.FE_HE_FUNDED = '11' THEN 'Tailored Learning'
+				WHEN UQA.FE_HE_FUNDED = '99' THEN 'Not Funded'
+			END,
+		StandardCode = STD.CODE,
+		StandardName = STD.DESCRIPTION,
+		FrameworkCode = UQA.SECTOR_FRAMEWORK,
+		FrameworkName = FW.DESCRIPTION,
+		StandardFrameworkCode = COALESCE ( STD.CODE, UQA.SECTOR_FRAMEWORK ),
+		StandardFrameworkName = COALESCE ( STD.DESCRIPTION, FW.DESCRIPTION ),
+		AppPathwayCode = UQA.APPRENTICESHIP_PATHWAY,
+		ProgTypeID = UQA.PROG_TYPE,
+		AimTypeCode = UQA.AIM_TYPE,
+		AimTypeName = AIMT.DESCRIPTION,
+		NVQLevelCode = COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ),
+		NVQLevelName =
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'E' THEN 'Entry Level'
+				ELSE 'Level ' + COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelSort = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'E' THEN 0
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'X' THEN -1
+				ELSE TRY_CAST ( FQA.NOTIONAL_LEVEL_V2_CODE AS INT )
+			END,
+		NVQLevelGroupCode = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN '1'
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 'H'
+				ELSE COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelGroupName =
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN 'Entry and Level 1'
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 'Level 4 and above'
+				ELSE 'Level ' + COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelGroupSort = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN 1
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'X' THEN -1
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 4
+				ELSE TRY_CAST ( FQA.NOTIONAL_LEVEL_V2_CODE AS INT )
+			END,
+		PlannedLearnHoursAim = COALESCE ( UQA.GUIDED_HOURS, 0 ),
+		PlannedEEPHoursAim = COALESCE ( UQA.PLANNED_EEP_HOURS, 0 ),
+		PlannedTotalTLevelHoursAim = COALESCE ( UQA.PLANNED_HOURS, 0 ),
+		PlannedYearlyTLevelHoursAim = CAST ( COALESCE ( UQA.PLANNED_HOURS, 0 ) AS FLOAT ) / CAST ( 2 AS FLOAT ),
+		NumDays = 
+			DATEDIFF ( 
+				DAY, 
+				COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ),
+				COALESCE ( 
+					UIO.FES_END_DATE,
+					UQA.END_DATE
+				)
+			)
+		INTO #Courses
+		--INTO EBSReporting.dbo.Course
+	FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+	INNER JOIN #CurrentYear CY
+		ON 1 = 1
+	INNER JOIN ebs.dbo.FUNDING_YEARS FY
+		ON FY.FUNDING_YEAR = CY.FundingYear
+	INNER JOIN ebs.dbo.UNIT_INSTANCES UI
+		ON UI.FES_UNIT_INSTANCE_CODE = UIO.FES_UINS_INSTANCE_CODE
+	INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+		ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+	--INNER JOIN ebs.dbo.ORGANISATION_UNITS FAC
+	--	ON FAC.ORGANISATION_CODE = UIO.OWNING_ORGANISATION
+	--INNER JOIN ebs.dbo.ORGANISATION_UNITS TEAM
+	--	ON TEAM.ORGANISATION_CODE = UIO.OFFERING_ORGANISATION
+	INNER JOIN ebs.dbo.ORGANISATION_UNITS TEAM
+		ON TEAM.ORGANISATION_CODE = UIO.OFFERING_ORGANISATION
+	INNER JOIN ebs.dbo.ORG_UNIT_LINKS LNK
+		ON LNK.SECONDARY_ORGANISATION = TEAM.ORGANISATION_CODE
+	INNER JOIN ebs.dbo.ORGANISATION_UNITS FAC
+		ON FAC.ORGANISATION_CODE = LNK.PRIMARY_ORGANISATION
+	INNER JOIN ebs.dbo.UIO_STATUSES STA
+		ON STA.STATUS = UIO.STATUS
+		AND STA.UIO_TYPE = 'CURRICULUM'
+	LEFT JOIN ebs.dbo.LOCATIONS LOC
+		ON LOC.LOCATION_CODE = UIO.SLOC_LOCATION_CODE
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = UQA.ID,
+			AimFundingYear = UQA.FUNDING_YEAR,
+			AimCourseID = UQA.UIO_ID,
+			AimIsDefault = UQA.DEFAULT_QA,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						UQA.FUNDING_YEAR,
+						UQA.UIO_ID
+					ORDER BY
+						UQA.DEFAULT_QA DESC
+				)
+		FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		INNER JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+			ON UQA.UIO_ID = UIO.UIO_ID
+		WHERE
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) UQAM
+		ON UQAM.AimCourseID = UIO.UIO_ID
+		AND UQAM.AimFundingYear = FY.FUNDING_YEAR
+		AND UQAM.RowNum = 1
+	LEFT JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+		ON UQA.ID = UQAM.AimID
+	LEFT JOIN ebs.dbo.FEFC_QUAL_AIMS FQA
+		ON FQA.QUAL_CODE = UQA.QUAL_CODE
+		AND FQA.FUNDING_YEAR = UQA.FUNDING_YEAR
+	LEFT JOIN ebs.dbo.PEOPLE FACO
+		ON FACO.PERSON_CODE = FAC.FES_DEPARTMENT_HEAD
+	LEFT JOIN ebs.dbo.PEOPLE TEAMO
+		ON TEAMO.PERSON_CODE = TEAM.FES_DEPARTMENT_HEAD
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS AIMT
+		ON AIMT.CODE = UQA.AIM_TYPE
+		AND AIMT.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND AIMT.RV_DOMAIN = 'AIM_TYPE'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS STD
+		ON STD.CODE = 
+			COALESCE ( 
+				UQA.APPRENTICESHIP_TRAILBLAZER_STD, 
+				CASE 
+					WHEN 
+						UQA.PROG_TYPE = '25' 
+						AND UQA.QUAL_CODE = 'ZPROG001' 
+						AND UIO.FES_UINS_INSTANCE_CODE LIKE '%/%'
+						AND LEN ( UIO.FES_UINS_INSTANCE_CODE ) = 6
+					THEN SUBSTRING ( UIO.FES_UINS_INSTANCE_CODE, 3, 3 )
+				END
+			)
+		AND STD.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND STD.RV_DOMAIN = 'APPRENTICESHIP_TRAILBLAZER_STANDARD'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS FW
+		ON FW.CODE = UQA.SECTOR_FRAMEWORK
+		AND FW.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND FW.RV_DOMAIN = 'SECTOR_FRAMEWORK'
+	LEFT JOIN ebs.dbo.VERIFIERS QT
+		ON QT.LOW_VALUE = UI.FES_QUALIFICATION_TYPE
+		AND QT.RV_DOMAIN = 'QUALIFICATION_TYPE'
+	LEFT JOIN ebs.dbo.VERIFIERS FT
+		ON FT.LOW_VALUE = UI.FES_SOURCE_FINANCE
+		AND FT.RV_DOMAIN = 'SOURCE_FINANCE'
+	LEFT JOIN ebs.dbo.MODES_OF_PROVISION MOA
+		ON MOA.MOA_CODE = UIO.FES_MOA_CODE
+	LEFT JOIN (
+		SELECT
+			CourseID = TUT.UIO_ID,
+			NumGroups = COUNT ( TUT.ID )
+		FROM ebs.dbo.TUTORGROUPS TUT
+		WHERE
+			TUT.STATUS = -1
+		GROUP BY
+			TUT.UIO_ID
+	) GRP
+		ON GRP.CourseID = UIO.UIO_ID
+	LEFT JOIN ebs.dbo.UIO_LINKS LNKU
+		ON LNKU.UIO_ID_TO = UIO.UIO_ID
+		AND LNKU.CALOCC_CODE_TO = UIO.CALOCC_OCCURRENCE_CODE
+		AND LNKU.IS_AVAILABLE = 'Y'
+	LEFT JOIN ebs.dbo.UNIT_INSTANCE_OCCURRENCES PUIO
+		ON PUIO.UIO_ID = LNKU.UIO_ID_FROM
+		AND PUIO.CALOCC_OCCURRENCE_CODE = LNKU.CALOCC_CODE_FROM
+	LEFT JOIN ebs.dbo.ORGANISATION_UNITS PTEAM
+		ON PTEAM.ORGANISATION_CODE = PUIO.OFFERING_ORGANISATION
+	LEFT JOIN ebs.dbo.ORG_UNIT_LINKS PLNK
+		ON PLNK.SECONDARY_ORGANISATION = PTEAM.ORGANISATION_CODE
+	LEFT JOIN ebs.dbo.ORGANISATION_UNITS PFAC
+		ON PFAC.ORGANISATION_CODE = PLNK.PRIMARY_ORGANISATION
+	LEFT JOIN ebs.dbo.LOCATIONS PLOC
+		ON PLOC.LOCATION_CODE = PUIO.SLOC_LOCATION_CODE
+	LEFT JOIN ebs.dbo.PEOPLE PFACO
+		ON PFACO.PERSON_CODE = PFAC.FES_DEPARTMENT_HEAD
+	LEFT JOIN ebs.dbo.PEOPLE PTEAMO
+		ON PTEAMO.PERSON_CODE = PTEAM.FES_DEPARTMENT_HEAD
+	LEFT JOIN (
+		SELECT DISTINCT
+			ENR.CourseID
+		FROM EBSReporting.dbo.ENROLMENT ENR
+		WHERE
+			ENR.AcademicYearID = @AcademicYear
+	) ENR
+		ON ENR.CourseID = UIO.UIO_ID
+	WHERE
+		--Dates span current year
+		(
+			(
+				COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) >= CAST ( CY.YrStart AS DATE )
+				--Where course spans 10 years only return current year instances (placeholder codes)
+				AND 
+					CASE
+						WHEN DATEDIFF ( YEAR, COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ), COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) < 10 THEN 1
+						ELSE
+							CASE
+								WHEN COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) >= CAST ( CY.YrStart AS DATE ) THEN 1
+								ELSE 0
+							END
+					END = 1
+			)
+			OR ENR.CourseID IS NOT NULL
+		)
+		--AND UIO.FES_UINS_INSTANCE_CODE = 'A/297S'
+		--AND UIO.CALOCC_OCCURRENCE_CODE = '23101'
+
+	--ORDER BY
+	--	COALESCE ( PUIO.OWNING_ORGANISATION, UIO.OWNING_ORGANISATION ),
+	--	COALESCE ( PUIO.OFFERING_ORGANISATION, UIO.OFFERING_ORGANISATION ),
+	--	COALESCE ( PUIO.FES_UINS_INSTANCE_CODE, UIO.FES_UINS_INSTANCE_CODE ),
+	--	COALESCE ( PUIO.CALOCC_OCCURRENCE_CODE, UIO.CALOCC_OCCURRENCE_CODE ),
+	--	UIO.OWNING_ORGANISATION,
+	--	UIO.OFFERING_ORGANISATION,
+	--	UIO.FES_UINS_INSTANCE_CODE,
+	--	UIO.CALOCC_OCCURRENCE_CODE
+
+
+
+	--Delete Existing Data for Academic Year
+	DELETE CRS
+	FROM EBSReporting.dbo.Course CRS
+	WHERE
+		CRS.AcademicYearID = @AcademicYear
+
+	--DROP TABLE IF EXISTS EBSReporting.dbo.Course
+	
+	--Main Query
+	INSERT INTO EBSReporting.dbo.Course
+	SELECT
+		CRS.AcademicYearID,
+		CRS.RefreshDate,
+		CRS.ParentChildFacultyCode,
+		CRS.ParentChildFacultyName,
+		CRS.ParentChildFacultyHeadStaffCode,
+		CRS.ParentChildFacultyHeadSurname,
+		CRS.ParentChildFacultyHeadForename,
+		CRS.ParentChildFacultyHeadName,
+		CRS.ParentChildTeamCode,
+		CRS.ParentChildTeamName,
+		CRS.ParentChildTeamFinanceCode,
+		CRS.ParentChildTeamHeadStaffCode,
+		CRS.ParentChildTeamHeadSurname,
+		CRS.ParentChildTeamHeadForename,
+		CRS.ParentChildTeamHeadName,
+		CRS.ParentChildStudyLocationCode,
+		CRS.ParentChildStudyLocationName,
+		CRS.ParentFacultyCode,
+		CRS.ParentFacultyName,
+		CRS.ParentFacultyHeadStaffCode,
+		CRS.ParentFacultyHeadSurname,
+		CRS.ParentFacultyHeadForename,
+		CRS.ParentFacultyHeadName,
+		CRS.ParentTeamCode,
+		CRS.ParentTeamName,
+		CRS.ParentTeamFinanceCode,
+		CRS.ParentTeamHeadStaffCode,
+		CRS.ParentTeamHeadSurname,
+		CRS.ParentTeamHeadForename,
+		CRS.ParentTeamHeadName,
+		CRS.ParentStudyLocationCode,
+		CRS.ParentStudyLocationName,
+		CRS.ParentRowNum,
+		CRS.FacultyCode,
+		CRS.FacultyName,
+		CRS.FacultyHeadStaffCode,
+		CRS.FacultyHeadSurname,
+		CRS.FacultyHeadForename,
+		CRS.FacultyHeadName,
+		CRS.TeamCode,
+		CRS.TeamName,
+		CRS.TeamFinanceCode,
+		CRS.TeamHeadStaffCode,
+		CRS.TeamHeadSurname,
+		CRS.TeamHeadForename,
+		CRS.TeamHeadName,
+		CRS.StudyLocationCode,
+		CRS.StudyLocationName,
+		CRS.SSA1Code,
+		CRS.SSA1Name,
+		CRS.SSA2Code,
+		CRS.SSA2Name,
+		CRS.ParentID,
+		CRS.ParentTitle,
+		CRS.ParentChildCourseID,
+		CRS.ParentChildCourseCode,
+		CRS.ParentChildCourseTitle,
+		CRS.ParentChildOccurrenceCode,
+		CRS.ParentCourseID,
+		CRS.ParentCourseCode,
+		CRS.ParentCourseTitle,
+		CRS.ParentOccurrenceCode,
+		CRS.CourseID,
+		CRS.CourseCode,
+		CRS.CourseTitle,
+		CRS.OccurrenceCode,
+		CRS.NumGroups,
+		CRS.CourseStatusCode,
+		CRS.CourseStatusName,
+		CRS.LearnAimRef,
+		CRS.LearnAimTitle,
+		CRS.CourseType,
+		CRS.IsSubcontracted,
+		CRS.SubcontractorName,
+		CRS.AwardBody,
+		CRS.LearningAimTypeCode,
+		CRS.LearningAimTypeName,
+		CRS.QualTypeCode,
+		CRS.QualTypeName,
+		CRS.SourceOfFinanceCode,
+		CRS.SourceOfFinanceName,
+		CRS.ModeOfAttendanceCode,
+		CRS.ModeOfAttendanceName,
+		CRS.CourseStartDate,
+		CRS.CourseEndDate,
+		CRS.IncludeInILR,
+		CRS.FirstYear,
+		CRS.YearNum,
+		CRS.OfYears,
+		CRS.FundStream,
+		CRS.FundSource,
+		CRS.FundModelCode,
+		CRS.FundModelName,
+		CRS.StandardCode,
+		CRS.StandardName,
+		CRS.FrameworkCode,
+		CRS.FrameworkName,
+		CRS.StandardFrameworkCode,
+		CRS.StandardFrameworkName,
+		CRS.AppPathwayCode,
+		CRS.ProgTypeID,
+		CRS.AimTypeCode,
+		CRS.AimTypeName,
+		CRS.NVQLevelCode,
+		CRS.NVQLevelName,
+		CRS.NVQLevelSort,
+		CRS.NVQLevelGroupCode,
+		CRS.NVQLevelGroupName,
+		CRS.NVQLevelGroupSort,
+		CRS.PlannedLearnHoursAim,
+		CRS.PlannedEEPHoursAim,
+		CRS.PlannedTotalTLevelHoursAim,
+		CRS.PlannedYearlyTLevelHoursAim,
+		CRS.NumDays
+		--INTO EBSReporting.dbo.Course
+	FROM #Courses CRS
+	WHERE
+		CRS.ParentRowNum = 1 --Some Maths and English courses have many parents
+
+
+	--Add Indexes
+	--ALTER TABLE EBSReporting.dbo.Course
+	--	ALTER COLUMN AcademicYearID VARCHAR(5) NOT NULL
+
+	--ALTER TABLE EBSReporting.dbo.Course
+	--	ALTER COLUMN CourseID INT NOT NULL;
+
+	--ALTER TABLE EBSReporting.dbo.Course
+	--	ADD CONSTRAINT PK_Course_CourseID PRIMARY KEY CLUSTERED (AcademicYearID, CourseID);
+END

@@ -1,0 +1,246 @@
+CREATE OR ALTER PROCEDURE [dbo].[SPR_EBS_StaffCourses]
+AS
+BEGIN
+	SET XACT_ABORT, NOCOUNT ON;
+	SET DATEFORMAT ymd
+
+	DECLARE @AcademicYear VARCHAR(5)
+
+	SET @AcademicYear = (
+		SELECT
+			CFG.Value
+		FROM Config CFG
+		WHERE
+			CFG.ConfigID = 'EBS_AcademicYearID'
+	)
+
+
+	--Get Current Year Dates
+	DROP TABLE IF EXISTS #CurrentYear
+	SELECT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		YrStart = FY.START_DATE,
+		YrEnd = FY.END_DATE
+	INTO #CurrentYear
+	FROM ebs.dbo.FUNDING_YEARS FY
+	WHERE
+		CAST ( FY.START_DATE AS DATE ) <= '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31'
+		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
+
+
+	--Staff Registers
+	DROP TABLE IF EXISTS #StaffRegisters
+	SELECT
+		AcademicYearID = @AcademicYear,
+		CourseID = UIO.UIO_ID,
+		CourseCode = UIO.FES_UINS_INSTANCE_CODE,
+		CourseInstance = UIO.COURSE_OCCURRENCE_CODE,
+		RegisterCode = RE.EVENT_CODE,
+		RegisterName = RE.DESCRIPTION,
+		StaffID = STF.PERSON_CODE,
+		StaffCode = STF.FES_STAFF_CODE,
+		StaffSurname = STF.SURNAME,
+		StaffForename = STF.FORENAME,
+		EventDateTime = COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ),
+		EventDate = CAST ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ) AS DATE ),
+		StartTime = FORMAT ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ), 'HH:mm' ),
+		EndTime = FORMAT ( COALESCE ( TS.ACTUAL_END_DATE, TS.PLANNED_END_DATE ), 'HH:mm' ),
+		MarkCode = TS.USAGE_CODE,
+		PlannedSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '' ) = '~' THEN 'N' -- Ignore neutral marks
+				ELSE 'Y'
+			END,
+		PossibleSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '~' ) = '~' THEN 'N' -- Ignore neutral marks
+				WHEN CAST ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ) AS DATE ) <= CAST ( GETDATE() AS DATE ) THEN 'Y'
+				ELSE 'N'
+			END,
+		AttendedSession = 
+			CASE 
+				WHEN CAST ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ) AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'Y' THEN 'Y'
+				WHEN CAST ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ) AS DATE ) <= CAST ( GETDATE() AS DATE ) AND USG.IS_POSITIVE = 'N' THEN 'N'
+				ELSE 'N'
+			END,
+		NeutralSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '' ) = '~' THEN 'Y'
+				ELSE 'N'
+			END,
+		FutureSession = 
+			CASE
+				WHEN COALESCE ( USG.IS_POSITIVE, '~' ) = '~' THEN 'N' -- Ignore neutral marks
+				WHEN CAST ( COALESCE ( TS.ACTUAL_START_DATE, TS.PLANNED_START_DATE ) AS DATE ) > CAST ( GETDATE() AS DATE ) THEN 'Y'
+				ELSE 'N'
+			END
+		INTO #StaffRegisters
+	FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+	INNER JOIN #CurrentYear CY
+		ON 1 = 1
+	INNER JOIN ebs.dbo.FUNDING_YEARS FY
+		ON FY.FUNDING_YEAR = CY.FundingYear
+	INNER JOIN ebs.dbo.UNIT_INSTANCES UI
+		ON UI.FES_UNIT_INSTANCE_CODE = UIO.FES_UINS_INSTANCE_CODE
+	INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+		ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS U
+		ON U.OBJECT_ID = UIO.UIO_ID
+		AND U.DETAIL_STATUS = 'A'
+		AND U.OBJECT_TYPE = 'U'
+	INNER JOIN ebs.dbo.REGISTER_EVENTS RE
+		ON RE.ID = U.REGISTER_EVENT_ID
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS T
+		ON T.REGISTER_EVENT_ID = RE.ID
+		AND T.DETAIL_STATUS = 'A'
+		AND T.OBJECT_TYPE = 'T'
+	INNER JOIN ebs.dbo.PEOPLE STF
+		ON STF.PERSON_CODE = T.OBJECT_ID
+	INNER JOIN ebs.dbo.REGISTER_EVENT_DETAILS_SLOTS TS
+		ON TS.REGISTER_EVENT_DETAIL_ID = T.ID
+		AND TS.OBJECT_TYPE = 'T'
+	LEFT JOIN ebs.dbo.USAGES USG
+		ON USG.USAGE_CODE = TS.USAGE_CODE
+		AND USG.OBJECT_TYPE = 'T'
+	LEFT JOIN ebs.dbo.EVENT_TYPES REGT
+		ON REGT.EVENT_TYPE = RE.EVENT_TYPE
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = UQA.ID,
+			AimFundingYear = UQA.FUNDING_YEAR,
+			AimCourseID = UQA.UIO_ID,
+			AimIsDefault = UQA.DEFAULT_QA,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						UQA.FUNDING_YEAR,
+						UQA.UIO_ID
+					ORDER BY
+						UQA.DEFAULT_QA DESC
+				)
+		FROM ebs.dbo.UIO_QUAL_AIMS UQA
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		WHERE 
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) UQAM
+		ON UQAM.AimCourseID = UIO.UIO_ID
+		AND UQAM.AimFundingYear = FY.FUNDING_YEAR
+		AND UQAM.RowNum = 1
+	LEFT JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+		ON UQA.ID = UQAM.AimID
+	LEFT JOIN ebs.dbo.FEFC_QUAL_AIMS FQA
+		ON FQA.QUAL_CODE = UQA.QUAL_CODE
+		AND FQA.FUNDING_YEAR = UQA.FUNDING_YEAR
+	WHERE
+		--Dates span current year
+		COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+		AND COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) >= CAST ( CY.YrStart AS DATE )
+		--Where course spans 10 years only return current year instances (placeholder codes)
+		AND 
+			CASE
+				WHEN DATEDIFF ( YEAR, COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ), COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) < 10 THEN 1
+				ELSE
+					CASE
+						WHEN COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) >= CAST ( CY.YrStart AS DATE ) THEN 1
+						ELSE 0
+					END
+			END = 1
+
+
+	--Rank Staff by Most Recent Session
+	DROP TABLE IF EXISTS #StaffRegisterSummary
+	SELECT
+		AcademicYearID = REG.AcademicYearID,
+		CourseID = REG.CourseID,
+		CourseCode = REG.CourseCode,
+		CourseInstance = REG.CourseInstance,
+		StaffID = REG.StaffID,
+		StaffCode = REG.StaffCode,
+		Planned = SUM ( CASE WHEN REG.PlannedSession = 'Y' THEN 1 ELSE 0 END ),
+		Possible = SUM ( CASE WHEN REG.PossibleSession = 'Y' THEN 1 ELSE 0 END ),
+		Attended = SUM ( CASE WHEN REG.AttendedSession = 'Y' THEN 1 ELSE 0 END ),
+		Neutral = SUM ( CASE WHEN REG.NeutralSession = 'Y' THEN 1 ELSE 0 END ),
+		MostRecentPossible = MAX ( CASE WHEN  REG.PossibleSession = 'Y' THEN REG.EventDateTime ELSE NULL END ),
+		MostRecentActual = MAX ( CASE WHEN  REG.AttendedSession = 'Y' THEN REG.EventDateTime ELSE NULL END ),
+		SoonestFuture = MIN ( CASE WHEN  REG.FutureSession = 'Y' THEN REG.EventDateTime ELSE NULL END )
+		INTO #StaffRegisterSummary
+	FROM #StaffRegisters REG
+	GROUP BY
+		REG.AcademicYearID,
+		REG.CourseID,
+		REG.CourseCode,
+		REG.CourseInstance,
+		REG.StaffID,
+		REG.StaffCode
+
+
+	--Main Lecturers
+	DROP TABLE IF EXISTS #MainLecturers
+	SELECT
+		REG.AcademicYearID,
+		REG.CourseID,
+		REG.CourseCode,
+		REG.CourseInstance,
+		REG.StaffID,
+		REG.StaffCode,
+		REG.Planned,
+		REG.Possible,
+		REG.Attended,
+		REG.Neutral,
+		REG.MostRecentPossible,
+		REG.MostRecentActual,
+		REG.SoonestFuture,
+		RowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					REG.CourseID
+				ORDER BY
+					REG.MostRecentPossible DESC,
+					REG.SoonestFuture ASC,
+					REG.Possible DESC
+			)
+		INTO #MainLecturers
+	FROM #StaffRegisterSummary REG
+
+
+	--Delete Existing Data for Academic Year
+	DELETE SCRS
+	FROM EBSReporting.dbo.StaffCourses SCRS
+	WHERE
+		SCRS.AcademicYearID = @AcademicYear
+
+
+	--DROP TABLE IF EXISTS EBSReporting.dbo.StaffCourses
+
+
+	--Main Query
+	INSERT INTO EBSReporting.dbo.StaffCourses
+	SELECT
+		LEC.AcademicYearID,
+		LEC.CourseID,
+		LEC.CourseCode,
+		LEC.CourseInstance,
+		LEC.StaffID,
+		LEC.StaffCode,
+		StaffSurname = STF.SURNAME,
+		StaffForename = STF.FORENAME,
+		StaffEmail = STF.COLLEGE_EMAIL
+		--INTO EBSReporting.dbo.StaffCourses
+	FROM #MainLecturers LEC
+	INNER JOIN ebs.dbo.PEOPLE STF
+		ON STF.PERSON_CODE = LEC.StaffID
+	WHERE
+		LEC.RowNum = 1
+
+	--Add Indexes
+	--ALTER TABLE EBSReporting.dbo.StaffCourses
+	--	ALTER COLUMN AcademicYearID VARCHAR(5) NOT NULL
+
+	--ALTER TABLE EBSReporting.dbo.StaffCourses
+	--	ADD CONSTRAINT PK_StaffCourses_AcademicYearIDCourseInstance PRIMARY KEY CLUSTERED (AcademicYearID, CourseInstance);
+END

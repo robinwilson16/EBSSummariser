@@ -1,0 +1,282 @@
+CREATE OR ALTER PROCEDURE SPR_EBS_Destination
+AS
+BEGIN
+	SET XACT_ABORT, NOCOUNT ON;
+	SET DATEFORMAT ymd
+
+	DECLARE @AcademicYear VARCHAR(5)
+
+	SET @AcademicYear = (
+		SELECT
+			CFG.Value
+		FROM Config CFG
+		WHERE
+			CFG.ConfigID = 'EBS_AcademicYearID'
+	)
+
+	--Get Current Year Dates
+	DROP TABLE IF EXISTS #CurrentYear
+	SELECT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		YrStart = FY.START_DATE,
+		YrEnd = FY.END_DATE
+	INTO #CurrentYear
+	FROM ebs.dbo.FUNDING_YEARS FY
+	WHERE
+		CAST ( FY.START_DATE AS DATE ) <= '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31'
+		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
+
+
+
+	--Enrolments
+	DROP TABLE IF EXISTS #Learners
+	SELECT DISTINCT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		PersonCode = P.PERSON_CODE
+		INTO #Learners
+	FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+	INNER JOIN #CurrentYear CY
+		ON 1 = 1
+	INNER JOIN ebs.dbo.FUNDING_YEARS FY
+		ON FY.FUNDING_YEAR = CY.FundingYear
+	INNER JOIN ebs.dbo.UNIT_INSTANCES UI
+		ON UI.FES_UNIT_INSTANCE_CODE = UIO.FES_UINS_INSTANCE_CODE
+	INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+		ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+	INNER JOIN ebs.dbo.PEOPLE_UNITS PU
+		ON PU.UIO_ID = UIO.UIO_ID
+		AND PU.UNIT_TYPE = 'R'
+	INNER JOIN ebs.dbo.PEOPLE P
+		ON P.PERSON_CODE = PU.PERSON_CODE
+	LEFT JOIN ebs.dbo.LSC_YEARLY_VERIFIERS CMP
+		ON CMP.CODE = PU.PROGRESS_CODE
+		AND CMP.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND CMP.DOMAIN = 'COMPST'
+	LEFT JOIN ebs.dbo.PEOPLE_UNITS_SPECIAL PUS
+		ON PUS.PEOPLE_UNITS_ID = PU.ID
+		AND PU.SPECIAL_DETAILS = 'Y'
+
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = UQA.ID,
+			AimFundingYear = UQA.FUNDING_YEAR,
+			AimCourseID = UQA.UIO_ID,
+			AimIsDefault = UQA.DEFAULT_QA,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						UQA.FUNDING_YEAR,
+						UQA.UIO_ID
+					ORDER BY
+						UQA.DEFAULT_QA DESC
+				)
+		FROM ebs.dbo.UIO_QUAL_AIMS UQA
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		WHERE 
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) UQAM
+		ON UQAM.AimCourseID = UIO.UIO_ID
+		AND UQAM.AimFundingYear = FY.FUNDING_YEAR
+		AND UQAM.RowNum = 1
+	LEFT JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+		ON UQA.ID = UQAM.AimID
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = LA.ID,
+			AimFundingYear = LA.FUNDING_YEAR,
+			AimPUID = LA.RUL_CODE,
+			AimILR = LA.ILR,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						LA.FUNDING_YEAR,
+						LA.RUL_CODE
+					ORDER BY
+						LA.ILR DESC,
+						CASE WHEN LA.UIO_ID IS NOT NULL THEN 1 ELSE 2 END
+				)
+		FROM ebs.dbo.LEARNER_AIMS LA
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		WHERE 
+			LA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) LAM
+		ON LAM.AimPUID = PU.ID
+		AND LAM.AimFundingYear = FY.FUNDING_YEAR
+		AND LAM.RowNum = 1
+	LEFT JOIN ebs.dbo.LEARNER_AIMS LA
+		ON LA.ID = LAM.AimID
+		AND PU.DATA_RETURN = 'Y'
+	WHERE
+		(
+			--Dates span current year
+			(
+				COALESCE ( LA.ORIG_LEARN_START_DATE, PUS.ORIG_LEARN_START_DATE, LA.START_DATE, PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND 
+					CASE
+						WHEN 
+						COALESCE ( 
+							LA.NVQ_ACHIEVE_DATE,
+							PUS.NVQ_ACHIEVE_DATE,
+							LA.END_DATE,
+							CASE
+								WHEN CMP.LSC_VALUE = '1' THEN NULL
+								ELSE PU.PROGRESS_DATE
+							END
+						) > COALESCE ( LA.EXP_END_DATE, PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+							COALESCE ( 
+								LA.NVQ_ACHIEVE_DATE,
+								PUS.NVQ_ACHIEVE_DATE,
+								CASE
+									WHEN CMP.LSC_VALUE = '1' THEN NULL
+									ELSE PU.PROGRESS_DATE
+								END
+							)
+						ELSE COALESCE ( LA.EXP_END_DATE, PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+					END >= CAST ( CY.YrStart AS DATE )
+			)
+			--Or still on programme (from previous year)
+			OR (
+				COALESCE ( LA.ORIG_LEARN_START_DATE, PUS.ORIG_LEARN_START_DATE, LA.START_DATE, PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND COALESCE (
+					LA.COMPLETION,
+					CMP.LSC_VALUE,
+					9
+				) = 1
+				AND UQA.QUAL_CODE IS NOT NULL --Only include ILR quals for late finishers
+			)
+		)
+		--AND UIO.FES_UINS_INSTANCE_CODE = 'Q100152'
+	--ORDER BY
+	--	P.SURNAME,
+	--	P.FORENAME,
+	--	P.PERSON_CODE
+
+
+	--Destinations
+	DROP TABLE IF EXISTS #Destinations
+	SELECT
+		AcademicYearID = LRN.AcademicYear,
+		LearnRefNumber = P.PERSON_CODE,
+		Surname = P.SURNAME,
+		Forename = P.FORENAME,
+		DestinationID = DES.ID,
+		OutcomeTypeCode = DEST.CODE,
+		OutcomeTypeName = DEST.DESCRIPTION,
+		OutcomeCode = DESTC.CODE,
+		OutcomeName = DESTC.DESCRIPTION,
+		OutcomeCollectionDate = DES.OUTCOME_COLLECTION_DATE,
+		OutcomeStartDate = DES.OUTCOME_START_DATE,
+		OutcomeEndDate = DES.OUTCOME_END_DATE,
+		OutcomeIncludeInILR = DES.INCLUDE_IN_DATA_RETURN,
+		OutcomeCreatedBy = DES.CREATED_BY,
+		OutcomeCreatedDate = DES.CREATED_DATE,
+		OutcomeUpdatedBy = DES.UPDATED_BY,
+		OutcomeUpdatedDate = DES.UPDATED_DATE,
+		RowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					LRN.FundingYear,
+					LRN.PersonCode
+				ORDER BY
+					CASE WHEN DEST.CODE = 'OTH' THEN 2 ELSE 1 END,--Ensure known destinations are not overriden by not known ones
+					DES.OUTCOME_START_DATE DESC,
+					DES.OUTCOME_COLLECTION_DATE DESC
+			)
+		INTO #Destinations
+	FROM ebs.dbo.PEOPLE P
+	INNER JOIN #Learners LRN
+		ON LRN.PersonCode = P.PERSON_CODE
+	LEFT JOIN ebs.dbo.PEOPLE_DEST_PROG_OUTCOMES DES
+		ON DES.PERSON_CODE = P.PERSON_CODE
+		AND DES.FUNDING_YEAR = LRN.FundingYear
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS DEST
+		ON DEST.CODE = COALESCE ( DES.OUTCOME_TYPE, 'OTH' )
+		AND DEST.FUNDING_YEAR = LRN.FundingYear
+		AND DEST.RV_DOMAIN = 'DPOUTCOMETYPE'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS DESTC
+		ON DESTC.CODE = COALESCE ( DES.OUTCOME_CODE, '4' )
+		AND DESTC.FUNDING_YEAR = LRN.FundingYear
+		AND DESTC.RV_DOMAIN = DEST.CODE
+	LEFT JOIN ebs.dbo.LSC_YEARLY_VERIFIERS DESTY
+		ON DESTY.CODE = DEST.CODE
+		AND DESTY.FUNDING_YEAR = LRN.FundingYear
+		AND DESTY.DOMAIN = 'DPOUTCOMETYPE'
+	LEFT JOIN ebs.dbo.LSC_YEARLY_VERIFIERS DESTCY
+		ON DESTCY.CODE = DESTC.CODE
+		AND DESTCY.FUNDING_YEAR = LRN.FundingYear
+		AND DESTCY.DOMAIN = DES.OUTCOME_TYPE
+	--ORDER BY
+	--	P.SURNAME,
+	--	P.FORENAME,
+	--	P.PERSON_CODE
+
+
+	--Delete Existing Data for Academic Year
+	DELETE CRS
+	FROM EBSReporting.dbo.Destination CRS
+	WHERE
+		CRS.AcademicYearID = @AcademicYear
+
+	--DROP TABLE IF EXISTS EBSReporting.dbo.Destination
+	
+	--Main Query
+	INSERT INTO EBSReporting.dbo.Destination
+	SELECT
+		DES.AcademicYearID,
+		RefreshDate = GETDATE(),
+		DES.LearnRefNumber,
+		DES.Surname,
+		DES.Forename,
+		DES.DestinationID,
+		DES.OutcomeTypeCode,
+		DES.OutcomeTypeName,
+		DES.OutcomeCode,
+		DES.OutcomeName,
+		DES.OutcomeCollectionDate,
+		DES.OutcomeStartDate,
+		DES.OutcomeEndDate,
+		DES.OutcomeIncludeInILR,
+		DES.OutcomeCreatedBy,
+		DES.OutcomeCreatedDate,
+		DES.OutcomeUpdatedBy,
+		DES.OutcomeUpdatedDate,
+		IsMainDestination = 
+			CASE
+				WHEN DES.RowNum = 1 THEN 'Y' 
+				ELSE 'N' 
+			END,
+		DES.RowNum
+		--INTO EBSReporting.dbo.Destination
+	FROM #Destinations DES
+	--WHERE
+	--	DES.RowNum = 1
+	--ORDER BY
+	--	DES.Surname,
+	--	DES.Forename,
+	--	DES.PersonCode
+
+
+
+	--Add Indexes
+	--ALTER TABLE EBSReporting.dbo.Destination
+	--	ALTER COLUMN AcademicYearID VARCHAR(5) NOT NULL
+
+	--ALTER TABLE EBSReporting.dbo.Destination
+	--	ALTER COLUMN LearnRefNumber INT NOT NULL;
+
+	--ALTER TABLE EBSReporting.dbo.Destination
+	--	ALTER COLUMN RowNum INT NOT NULL;
+
+	--ALTER TABLE EBSReporting.dbo.Destination
+	--	ADD CONSTRAINT PK_Course_LearnRefNumber PRIMARY KEY CLUSTERED (AcademicYearID, LearnRefNumber, RowNum);
+END

@@ -1,0 +1,1601 @@
+CREATE OR ALTER PROCEDURE SPR_EBS_Application
+AS
+BEGIN
+	SET XACT_ABORT, NOCOUNT ON;
+	SET DATEFORMAT ymd
+
+	DECLARE @AcademicYear VARCHAR(5)
+
+	SET @AcademicYear = (
+		SELECT
+			CFG.Value
+		FROM Config CFG
+		WHERE
+			CFG.ConfigID = 'EBS_AppAcademicYearID'
+	)
+
+	--Get Current Year Dates
+	DROP TABLE IF EXISTS #CurrentYear
+	SELECT
+		AcademicYear = @AcademicYear,
+		FundingYear = FY.FUNDING_YEAR,
+		YrStart = FY.START_DATE,
+		YrEnd = FY.END_DATE
+	INTO #CurrentYear
+	FROM ebs.dbo.FUNDING_YEARS FY
+	WHERE
+		CAST ( FY.START_DATE AS DATE ) <= '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31'
+		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
+
+
+	--Main Addresses
+	DROP TABLE IF EXISTS #Addresses
+	SELECT
+		PersonCode = P.PERSON_CODE,
+		AddressCode = AD.ADDRESS_CODE,
+		RowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					P.PERSON_CODE
+				ORDER BY
+					CASE
+						WHEN AD.END_DATE IS NULL THEN 1
+						ELSE 2
+					END,
+					CASE
+						WHEN AD.ADDRESS_TYPE = 'H' THEN 1
+						WHEN AD.ADDRESS_TYPE = 'T' THEN 2
+						WHEN AD.ADDRESS_TYPE = 'A' THEN 3
+						WHEN AD.ADDRESS_TYPE = 'P' THEN 4
+						WHEN AD.ADDRESS_TYPE = 'N' THEN 5
+						WHEN AD.ADDRESS_TYPE = 'O' THEN 6
+						ELSE 9
+					END
+			)
+		INTO #Addresses
+	FROM ebs.dbo.PEOPLE P
+	INNER JOIN ebs.dbo.ADDRESSES AD
+		ON AD.PERSON_CODE = P.PERSON_CODE
+		AND AD.OWNER_TYPE = 'P'
+
+
+	--Contacts
+	DROP TABLE IF EXISTS #Contacts
+	SELECT
+		CON.PersonCode,
+		TrainingConsultant1StaffRef = MAX ( CASE WHEN CON.Relationship = 'TC' THEN CON.StaffRef ELSE NULL END ),
+		TrainingConsultant1StaffName = MAX ( CASE WHEN CON.Relationship = 'TC' THEN CON.StaffName ELSE NULL END ),
+		TrainingConsultant2StaffRef = MAX ( CASE WHEN CON.Relationship = 'STC' THEN CON.StaffRef ELSE NULL END ),
+		TrainingConsultant2StaffName = MAX ( CASE WHEN CON.Relationship = 'STC' THEN CON.StaffName ELSE NULL END ),
+		BusinessDevelopmentStaffRef = MAX ( CASE WHEN CON.Relationship = 'BD' THEN CON.StaffRef ELSE NULL END ),
+		BusinessDevelopmentStaffName = MAX ( CASE WHEN CON.Relationship = 'BD' THEN CON.StaffName ELSE NULL END )
+		INTO #Contacts
+	FROM (
+		SELECT
+			PersonCode = P.PERSON_CODE,
+			Relationship = PL.RELATIONSHIP,
+			StaffRef = STF.PERSON_CODE,
+			StaffName = STF.FORENAME + ' ' + STF.SURNAME + ' (' + CAST ( STF.PERSON_CODE AS VARCHAR(50) ) + ')',
+			RowNum =
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						P.PERSON_CODE,
+						PL.RELATIONSHIP
+					ORDER BY
+						PL.START_DATE DESC,
+						CASE
+							WHEN PL.END_DATE IS NULL THEN 1 
+							ELSE 2 
+						END,
+						P.PERSON_CODE DESC
+				)
+		FROM ebs.dbo.PEOPLE P
+		INNER JOIN ebs.dbo.PEOPLE_PEOPLE_LINKS PL
+			ON PL.PERSON_CODE_TO = P.PERSON_CODE
+			AND PL.RELATIONSHIP IN (
+				'TC', --Training Consultant (in charge of delivery aspect)
+				'STC', --Secondary Training Consultant
+				'BD' --Business Development (manages changes to employer)
+			)
+		INNER JOIN ebs.dbo.PEOPLE STF
+			ON STF.PERSON_CODE = PL.PERSON_CODE_FROM
+		WHERE
+			CAST ( COALESCE ( PL.END_DATE, GETDATE() ) AS DATE ) >= CAST ( GETDATE() AS DATE )
+	) CON
+	WHERE
+		CON.RowNum = 1
+	GROUP BY
+		CON.PersonCode
+
+
+	--Main Disability
+	DROP TABLE IF EXISTS #Disabilities
+	SELECT
+		DisabilityID = DIS.ID,
+		PersonCode = DIS.PER_PERSON_CODE,
+		DisabilityTypeCode = DIS.DISABILITY_TYPE,
+		DisabilityTypeName = DISD.FES_LONG_DESCRIPTION,
+		StartDate = DIS.START_DATE,
+		EndDate = DIS.END_DATE,
+		IsPrimaryNeed = DIS.PRIMARY_NEED,
+		SpecialExamNeeds = DIS.SPECIAL_EXAM_NEEDS,
+		IsAssistanceRequired = DIS.IS_ASSISTANCE_REQUIRED,
+		IncludeInILR = DIS.DATA_RETURN,
+		IsCurrent = 
+			CASE
+				WHEN 
+					CAST ( COALESCE ( DIS.START_DATE, GETDATE() ) AS DATE ) <= CAST ( GETDATE() AS DATE )
+					AND CAST ( COALESCE ( DIS.END_DATE, GETDATE() ) AS DATE ) >= CAST ( GETDATE() AS DATE )
+					THEN 'Y'
+				ELSE 'N'
+			END,
+		CreatedBy = DIS.CREATED_BY,
+		CreatedDate = DIS.CREATED_DATE,
+		RowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					DIS.PER_PERSON_CODE
+				ORDER BY
+					DIS.PRIMARY_NEED DESC,
+					DIS.DATA_RETURN DESC,
+					CASE
+						WHEN 
+							CAST ( COALESCE ( DIS.START_DATE, GETDATE() ) AS DATE ) <= CAST ( GETDATE() AS DATE )
+									AND CAST ( COALESCE ( DIS.END_DATE, GETDATE() ) AS DATE ) >= CAST ( GETDATE() AS DATE )
+									THEN 'Y'
+						ELSE 'N'
+					END DESC,
+					DIS.SPECIAL_EXAM_NEEDS DESC,
+					DIS.IS_ASSISTANCE_REQUIRED DESC,
+					DIS.CREATED_DATE DESC,
+					DIS.ID DESC
+			)
+		INTO #Disabilities
+	FROM ebs.dbo.DISABILITIES DIS
+	INNER JOIN ebs.dbo.VERIFIERS DISD
+		ON DISD.LOW_VALUE = DIS.DISABILITY_TYPE
+		AND DISD.RV_DOMAIN = 'DISABILITY_TYPE'
+	WHERE
+		CAST ( COALESCE ( DIS.START_DATE, '20' + LEFT ( @AcademicYear, 2 ) + '-08-01' ) AS DATE ) <= CAST ( '20' + LEFT ( @AcademicYear, 2 ) + '-07-31' AS DATE )
+		AND CAST ( COALESCE ( DIS.END_DATE, '20' + RIGHT ( @AcademicYear, 2 ) + '-07-31' ) AS DATE ) >= CAST ( '20' + LEFT ( @AcademicYear, 2 ) + '-08-01' AS DATE )
+		AND ISNUMERIC ( DIS.DISABILITY_TYPE ) = 1 --Exclude non-ILR codes
+
+
+	--Main Query
+	DROP TABLE IF EXISTS #Apps
+	SELECT
+		AcademicYearID = @AcademicYear,
+		YearStart = CY.YrStart,
+		YearEnd = CY.YrEnd,
+		LearnRefNumber = CAST ( P.PERSON_CODE AS VARCHAR(50) ),
+		LearnRefNumberILR = COALESCE ( P.FES_SEC_PERSON_CODE, CAST ( P.PERSON_CODE AS VARCHAR(50) ) ),
+		Surname = P.SURNAME,
+		Forename = P.FORENAME,
+		DOB = P.DATE_OF_BIRTH,
+		Age31Aug = 
+			CASE
+				WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+				ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+			END,
+		AgeGroup = 
+			CASE
+				WHEN 
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END
+					< 16 THEN '14-15'
+				WHEN 
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END
+					BETWEEN 16 AND 18 THEN '16-18'
+				WHEN 
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END
+					BETWEEN 19 AND 23 THEN '19-23'
+				WHEN 
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END 
+					>= 24 THEN '24+'
+			END,
+		ULN = P.UNIQUE_LEARN_NO,
+		Address1 = AD.ADDRESS_LINE_1,
+		Address2 = AD.ADDRESS_LINE_2,
+		Address3 = AD.ADDRESS_LINE_3,
+		Address4 = AD.ADDRESS_LINE_4,
+		Address5 = AD.ADDRESS_LINE_5,
+		Town = AD.TOWN,
+		County = AD.REGION,
+		PostCode = AD.UK_POST_CODE_PT1 + ' ' + AD.UK_POST_CODE_PT2,
+		TelMobile = P.MOBILE_PHONE_NUMBER,
+		TelHome = AD.TELEPHONE,
+		EmailCollege = P.COLLEGE_EMAIL,
+		EmailPersonal = P.PERSONAL_EMAIL,
+		EmailOther = AD.EMAIL_ADDRESS,
+		EmergencyContact1Name = P.FES_NEXT_OF_KIN,
+		EmergencyContact1Number = P.MOBILE_PHONE_NUMBER,
+		EmergencyContact2Name = P.FES_USER_47,
+		EmergencyContact2Number = P.FES_USER_48,
+		SexCode = P.SEX,
+		SexName = SEX.FES_LONG_DESCRIPTION,
+		DeclaredSex = PAD.DECLARED_SEX,
+		GenderCode = PAD.GENDER,
+		GenderName = GEN.FES_LONG_DESCRIPTION,
+		Pronouns = PAD.PRONOUNS,
+		JobTitle = PAD.JOB_TITLE,
+		EthnicityCode = COALESCE ( P.ETHNICITY, 99 ),
+		EthnicityName = ETH.DESCRIPTION,
+		EthnicGroup = 
+			CASE
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 99 THEN 'Not Provided'
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 31 THEN 'White British'
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 34 THEN 'White'
+				ELSE 'Ethnic Minority'
+			END,
+		EthnicGroupSort = 
+			CASE
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 99 THEN 1
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 31 THEN 4
+				WHEN COALESCE ( P.ETHNICITY, 99 ) = 34 THEN 3
+				ELSE 2
+			END,
+		FreeSchoolMealsCode = 
+			CASE
+				WHEN PI.FREE_MEAL_ELIGIBILITY IN ( 'Y', '1', '2' ) THEN 'Y'
+				ELSE 'N'
+			END,
+		FreeSchoolMealsName = 
+			CASE
+				WHEN PI.FREE_MEAL_ELIGIBILITY IN ( 'Y', '1', '2' ) THEN 'Eligible for Free School Meals'
+				ELSE 'Not Eligible for Free School Meals'
+			END,
+		InCare = PAD.IS_IN_CARE,
+		IsCarer = PAD.IS_CARER,
+		HasCriminalConvictions = PAD.HAS_CRIMINAL_CONVICTIONS,
+		InterviewAssistanceRequired = PAD.IS_INTERVIEW_ASSIST_REQUIRED,
+		EHCPCode = PI.HAS_HEALTHCARE_PLAN,
+		EHCPName = 
+			CASE
+				WHEN PI.HAS_HEALTHCARE_PLAN = 'Y' THEN 'Has Educational Health Care Plan'
+				ELSE 'Does Not Have Educational Health Care Plan'
+			END,
+		HighNeedsCode = PI.HIGH_NEEDS,
+		HighNeedsName = 
+			CASE
+				WHEN PI.HIGH_NEEDS = 'Y' THEN 'Is a High Needs Learner'
+				ELSE 'Not a High Needs Learner'
+			END,
+		LearnDifDisCode = COALESCE ( P.LEARN_DIFF, 9 ),
+		LearnDifDisName = DIF.DESCRIPTION,
+		LearnDifAssess = 
+			CASE
+				WHEN PI.LEARN_DIFF_ASSMT = 'Y' THEN 'Y'
+				ELSE 'N'
+			END,
+		MainDifficultyDisabilityCode = DIS.DisabilityTypeCode,
+		MainDifficultyDisabilityName = DIS.DisabilityTypeName,
+		GCSEMathsGrade = PI.GCSE_MATHS_QUAL_GRADE,
+		GCSEEnglishGrade = PI.GCSE_ENGLISH_QUAL_GRADE,
+		FacultyCode = FAC.ORGANISATION_CODE,
+		FacultyName = FAC.FES_FULL_NAME,
+		FacultyHeadStaffCode = FACO.FES_STAFF_CODE,
+		FacultyHeadSurname = FACO.SURNAME,
+		FacultyHeadForename = FACO.FORENAME,
+		FacultyHeadName = FACO.FORENAME + ' ' + FACO.SURNAME + ' (' + FACO.FES_STAFF_CODE + ')',
+		TeamCode = UIO.OFFERING_ORGANISATION,
+		TeamName = TEAM.FES_FULL_NAME,
+		TeamHeadStaffCode = TEAMO.FES_STAFF_CODE,
+		TeamHeadSurname = TEAMO.SURNAME,
+		TeamHeadForename = TEAMO.FORENAME,
+		TeamHeadName = TEAMO.FORENAME + ' ' + TEAMO.SURNAME + ' (' + TEAMO.FES_STAFF_CODE + ')',
+		StudyLocationCode = UIO.SLOC_LOCATION_CODE,
+		StudyLocationName = LOC.FES_LONG_DESCRIPTION,
+		SSA1Code = FQA.SSA_TIER1_CODE,
+		SSA1Name = RIGHT ( '00' + FQA.SSA_TIER1_CODE, 2 ) + ' - ' + FQA.SSA_TIER1_DESCRIPTION,
+		SSA2Code = FQA.SSA_TIER2_CODE,
+		SSA2Name = RIGHT ( '00' + FQA.SSA_TIER2_CODE, 4 ) + ' - ' + FQA.SSA_TIER2_DESCRIPTION,
+		ApplicationID = PU.ID,
+		ParentID = UI.UI_ID,
+		ParentTitle = UI.FULL_DESCRIPTION,
+		CourseID = UIO.UIO_ID,
+		CourseCode = UIO.FES_UINS_INSTANCE_CODE,
+		CourseTitle = UIO.LONG_DESCRIPTION,
+		OccurrenceCode = UIO.CALOCC_OCCURRENCE_CODE,
+		GroupCode = COALESCE ( TUT.Name, 'None' ),
+		LearnAimRef = UQA.QUAL_CODE,
+		LearnAimTitle = FQA.DESCRIPTION,
+		IsSubcontracted = 
+			CASE
+				WHEN FAC.ORGANISATION_CODE = 'PART' THEN 'Y'
+				ELSE 'N'
+			END,
+		SubcontractorName = 
+			CASE
+				WHEN FAC.ORGANISATION_CODE = 'PART' THEN REPLACE ( TEAM.FES_FULL_NAME, 'Partnerships - ', '' )
+				ELSE NULL
+			END,
+		AwardBody = FQA.AWARD_BODY_1,
+		LearningAimTypeCode = FQA.QUAL_TYPE,
+		LearningAimTypeName = FQA.QUAL_TYPE_DESCRIPTION,
+		QualTypeCode = UI.FES_QUALIFICATION_TYPE,
+		QualTypeName = QT.FES_LONG_DESCRIPTION,
+		SourceOfFinanceCode = UI.FES_SOURCE_FINANCE,
+		SourceOfFinanceName = FT.FES_LONG_DESCRIPTION,
+		ModeOfAttendanceCode = UIO.FES_MOA_CODE,
+		ModeOfAttendanceName = MOA.FES_LONG_DESCRIPTION,
+		CompletionStatusCode = 
+			COALESCE (
+				CMP.LSC_VALUE,
+				9
+			),
+		CompletionStatusName = 
+			CASE
+				COALESCE (
+					CMP.LSC_VALUE,
+					9
+				)
+				WHEN 1 THEN 'Continuing'
+				WHEN 2 THEN 'Completed'
+				WHEN 3 THEN 'Withdrawn'
+				WHEN 4 THEN 'Transferred'
+				WHEN 6 THEN 'Break in Learning'
+				ELSE NULL
+			END,
+		OutcomeCode = 
+			COALESCE (
+				OC.LSC_VALUE,
+				9
+			),
+		OutcomeName = 
+			CASE
+				COALESCE (
+					OC.LSC_VALUE,
+					9
+				)
+				WHEN 1 THEN 'Achieved'
+				WHEN 2 THEN 'Partially Achieved'
+				WHEN 3 THEN 'Failed'
+				WHEN 8 THEN 'Unknown Outcome'
+				ELSE NULL
+			END,
+		WithdrawalReasonCode = PUS.END_REASON,
+		WithdrawalReasonName = ENDR.DESCRIPTION,
+		CourseStartDate = COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ),
+		CourseEndDate = COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ),
+		OriginalStartDate = PUS.ORIG_LEARN_START_DATE,
+		StartDate = COALESCE ( PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ),
+		PlannedEndDate = COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ),
+		ActualEndDate = 
+			CASE
+				WHEN CMP.LSC_VALUE = '1' THEN NULL
+				ELSE PU.PROGRESS_DATE
+			END,
+		AchievementDate = 
+			PUS.NVQ_ACHIEVE_DATE,
+		IsStartThisYear = 
+			CASE
+				WHEN
+					CASE
+						WHEN 
+						COALESCE ( 
+							PUS.NVQ_ACHIEVE_DATE,
+							CASE
+								WHEN CMP.LSC_VALUE = '1' THEN NULL
+								ELSE PU.PROGRESS_DATE
+							END
+						) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+							COALESCE ( 
+								PUS.NVQ_ACHIEVE_DATE,
+								CASE
+									WHEN CMP.LSC_VALUE = '1' THEN NULL
+									ELSE PU.PROGRESS_DATE
+								END
+							)
+						ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+					END >= CAST ( CY.YrStart AS DATE ) THEN 'Y'
+				ELSE 'N'
+			END,
+		IsPastPlannedEndDate = 
+			CASE
+				WHEN 
+					COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) <= CAST ( CY.YrStart AS DATE )
+					AND COALESCE (
+						CMP.LSC_VALUE,
+						9
+					) = 1
+					AND UQA.QUAL_CODE IS NOT NULL --Only include ILR quals for late finishers
+				THEN 'Y'
+				ELSE 'N'
+			END,
+		IncludeInILR = 
+			CASE
+				WHEN CMP.LSC_VALUE IN ( '1', '2', '3', '4', '6' ) AND UQA.QUAL_CODE IS NOT NULL THEN 'Y'
+				ELSE 'N'
+			END,
+		FirstYear = 
+			CASE
+				WHEN COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) >= CAST ( CY.YrStart AS DATE ) THEN 'Y'
+				ELSE 'N'
+			END,
+		YearNum = 
+			DATEDIFF (
+				YEAR,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ), 8, 1)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) - 1, 8, 1)
+				END,
+				CY.YrStart
+			),
+		OfYears = 
+			DATEDIFF (
+				YEAR,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ), 8, 1)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_START_DATE, UQA.START_DATE ) ) - 1, 8, 1)
+				END,
+				CASE
+					WHEN MONTH( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) >= 8 THEN DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ) + 1, 7, 31)
+					ELSE DATEFROMPARTS(YEAR( COALESCE ( UIO.FES_END_DATE, UQA.END_DATE ) ), 7, 31)
+				END
+			),
+		HybridEndYear = 
+			CASE
+				WHEN
+					CASE
+						WHEN 
+						COALESCE ( 
+							PUS.NVQ_ACHIEVE_DATE,
+							CASE
+								WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+								ELSE PU.PROGRESS_DATE
+							END
+						) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+							COALESCE ( 
+							PUS.NVQ_ACHIEVE_DATE,
+							CASE
+								WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+								ELSE PU.PROGRESS_DATE
+							END
+						)
+						ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+					END < '20' + LEFT ( @AcademicYear, 2 ) + '-08-01' THEN @AcademicYear
+					ELSE
+						CASE
+							WHEN 
+								MONTH (
+									CASE
+										WHEN 
+										COALESCE ( 
+											PUS.NVQ_ACHIEVE_DATE,
+											CASE
+												WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+												ELSE PU.PROGRESS_DATE
+											END
+										) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+											COALESCE ( 
+											PUS.NVQ_ACHIEVE_DATE,
+											CASE
+												WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+												ELSE PU.PROGRESS_DATE
+											END
+										)
+										ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+									END
+								) <= 7 THEN
+									RIGHT (
+										CAST (
+											YEAR (
+												CASE
+													WHEN 
+													COALESCE ( 
+														PUS.NVQ_ACHIEVE_DATE,
+														CASE
+															WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+															ELSE PU.PROGRESS_DATE
+														END
+													) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+														COALESCE ( 
+														PUS.NVQ_ACHIEVE_DATE,
+														CASE
+															WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+															ELSE PU.PROGRESS_DATE
+														END
+													)
+													ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+												END
+											) - 1
+										AS VARCHAR(4) )
+										,
+										2
+									)
+							ELSE
+								RIGHT (
+									CAST (
+										YEAR (
+											CASE
+												WHEN 
+												COALESCE ( 
+													PUS.NVQ_ACHIEVE_DATE,
+													CASE
+														WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+														ELSE PU.PROGRESS_DATE
+													END
+												) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+													COALESCE ( 
+													PUS.NVQ_ACHIEVE_DATE,
+													CASE
+														WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+														ELSE PU.PROGRESS_DATE
+													END
+												)
+												ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+											END
+										)
+									AS VARCHAR(4) )
+									,
+									2
+								)
+						END
+						+ '/'
+						+ CASE
+							WHEN 
+								MONTH (
+									CASE
+										WHEN 
+										COALESCE ( 
+											PUS.NVQ_ACHIEVE_DATE,
+											CASE
+												WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+												ELSE PU.PROGRESS_DATE
+											END
+										) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+											COALESCE ( 
+											PUS.NVQ_ACHIEVE_DATE,
+											CASE
+												WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+												ELSE PU.PROGRESS_DATE
+											END
+										)
+										ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+									END
+								) <= 7 THEN
+									RIGHT (
+										CAST (
+											YEAR (
+												CASE
+													WHEN 
+													COALESCE ( 
+														PUS.NVQ_ACHIEVE_DATE,
+														CASE
+															WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+															ELSE PU.PROGRESS_DATE
+														END
+													) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+														COALESCE ( 
+														PUS.NVQ_ACHIEVE_DATE,
+														CASE
+															WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+															ELSE PU.PROGRESS_DATE
+														END
+													)
+													ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+												END
+											)
+										AS VARCHAR(4) )
+										,
+										2
+									)
+							ELSE
+								RIGHT (
+									CAST (
+										YEAR (
+											CASE
+												WHEN 
+												COALESCE ( 
+													PUS.NVQ_ACHIEVE_DATE,
+													CASE
+														WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+														ELSE PU.PROGRESS_DATE
+													END
+												) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+													COALESCE ( 
+													PUS.NVQ_ACHIEVE_DATE,
+													CASE
+														WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+														ELSE PU.PROGRESS_DATE
+													END
+												)
+												ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+											END
+										) + 1
+									AS VARCHAR(4) )
+									,
+									2
+								)
+						END
+			END,
+		ApplicationStatusCode = PU.PROGRESS_STATUS,
+		ApplicationStatusName = STA.DESCRIPTION,
+		ApplicationStageCode = PU.PROGRESS_CODE,
+		ApplicationStageName = PC.FES_LONG_DESCRIPTION,
+		FundStream = COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ),
+		FundSource = UQA.MAJOR_FUND_SOURCE,
+		IsAdvLearnLoanFunded = PUS.HAS_STUDY_LOAN,
+		ProvisionType = 
+			CASE
+				WHEN
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END < 16 THEN 'EPYP'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IN ( '30', '31' ) THEN 'EPYP'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' THEN 'EPYP'
+				WHEN PUS.HAS_STUDY_LOAN = 'Y' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '36' THEN 'Apprenticeships'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) = '25' THEN 'Apprenticeships'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IS NOT NULL THEN 'Apprenticeships'
+				WHEN FQA.NOTIONAL_LEVEL_V2_CODE IN ( '4', '5', '6', '7', '8' ) THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' THEN 'Adult Learning'
+				WHEN UQA.MAJOR_FUND_SOURCE = '1' THEN 'Adult Learning'
+				WHEN QT.FES_LONG_DESCRIPTION LIKE 'Higher Education%' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '10' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '11' THEN 'Adult Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '99' THEN 'Adult Learning'
+			END,
+		FundModelCode = 
+			CASE
+				WHEN
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END < 16 THEN '14-15'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IN ( '30', '31' ) THEN 'TLevel'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' THEN '16-19'
+				WHEN PUS.HAS_STUDY_LOAN = 'Y' THEN 'AdvLoan'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '36' THEN 'App' --Standard
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) = '25' THEN 'App' --Standard
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IS NOT NULL THEN 'App' --Framework
+				WHEN FQA.NOTIONAL_LEVEL_V2_CODE IN ( '4', '5', '6', '7', '8' ) THEN 'HE-Other'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'AEB-ESFA'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' THEN 'AEB-Dev'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'ASF-ESFA'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' THEN 'ASF-Dev'
+				WHEN UQA.MAJOR_FUND_SOURCE = '1' THEN 'HE-HEFCE'
+				WHEN QT.FES_LONG_DESCRIPTION LIKE 'Higher Education%' THEN 'HE-Fran'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '10' THEN 'ComLearn'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '11' THEN 'TailoredLearn'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '99' THEN 'NoFund'
+			END,
+		FundModelName = 
+			CASE
+				WHEN
+					CASE
+						WHEN MONTH ( P.DATE_OF_BIRTH ) <= 8 THEN '20' + LEFT ( @AcademicYear, 2 ) - YEAR ( P.DATE_OF_BIRTH )
+						ELSE CAST ('20' + LEFT ( @AcademicYear, 2 ) AS INT ) - 1 - YEAR ( P.DATE_OF_BIRTH )
+					END < 16 THEN '14-15'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IN ( '30', '31' ) THEN 'T Level'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '25' THEN '16-19 Students (inc. High Needs)'
+				WHEN PUS.HAS_STUDY_LOAN = 'Y' THEN 'Adv Learner Loan'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '36' THEN 'Apprenticeship'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) = '25' THEN 'Apprenticeship'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) IN ( '35', '36' ) AND COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ) IS NOT NULL THEN 'Apprenticeship'
+				WHEN FQA.NOTIONAL_LEVEL_V2_CODE IN ( '4', '5', '6', '7', '8' ) THEN 'HE - Non-Prescribed'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'AEB Adult - ESFA'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '35' THEN 'AEB Adult - Devolved'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' AND UQA.MAJOR_FUND_SOURCE = '105' THEN 'ASF Adult - ESFA'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '38' THEN 'ASF Adult - Devolved'
+				WHEN UQA.MAJOR_FUND_SOURCE = '1' THEN 'HE - HEFCE'
+				WHEN QT.FES_LONG_DESCRIPTION LIKE 'Higher Education%' THEN 'HE - Franchised'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '10' THEN 'Community Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '11' THEN 'Tailored Learning'
+				WHEN COALESCE ( PUS.FUNDING_STREAM, UQA.FE_HE_FUNDED ) = '99' THEN 'Not Funded'
+			END,
+		StandardCode = COALESCE ( PUS.APPRENTICESHIP_TRAILBLAZER_STD, UQA.APPRENTICESHIP_TRAILBLAZER_STD ),
+		StandardName = STD.DESCRIPTION,
+		FrameworkCode = COALESCE ( PUS.SECTOR_FRAMEWORK, UQA.SECTOR_FRAMEWORK ),
+		FrameworkName = FW.DESCRIPTION,
+		StandardFrameworkCode = COALESCE ( PUS.APPRENTICESHIP_TRAILBLAZER_STD, UQA.APPRENTICESHIP_TRAILBLAZER_STD, PUS.SECTOR_FRAMEWORK, UQA.SECTOR_FRAMEWORK ),
+		StandardFrameworkName = COALESCE ( STD.DESCRIPTION, FW.DESCRIPTION ),
+		AppPathwayCode = COALESCE ( PUS.APPRENTICESHIP_PATHWAY, UQA.APPRENTICESHIP_PATHWAY ),
+		ProgTypeID = COALESCE ( PUS.PROG_TYPE, UQA.PROG_TYPE ),
+		AimTypeCode = COALESCE ( PUS.AIM_TYPE, UQA.AIM_TYPE ),
+		AimTypeName = AIMT.DESCRIPTION,
+		NVQLevelCode = COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ),
+		NVQLevelName =
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'E' THEN 'Entry Level'
+				ELSE 'Level ' + COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelSort = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'E' THEN 0
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'X' THEN -1
+				ELSE TRY_CAST ( FQA.NOTIONAL_LEVEL_V2_CODE AS INT )
+			END,
+		NVQLevelGroupCode = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN '1'
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 'H'
+				ELSE COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelGroupName =
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN 'Entry and Level 1'
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 'Level 4 and above'
+				ELSE 'Level ' + COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' )
+			END,
+		NVQLevelGroupSort = 
+			CASE
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( 'E', '1' ) THEN 1
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) = 'X' THEN -1
+				WHEN COALESCE ( FQA.NOTIONAL_LEVEL_V2_CODE, 'X' ) IN ( '4', '5', '6', '7', '8', '9' ) THEN 4
+				ELSE TRY_CAST ( FQA.NOTIONAL_LEVEL_V2_CODE AS INT )
+			END,
+		PlannedLearnHoursAim = COALESCE ( PUS.EXP_GUIDED_HRS, UQA.GUIDED_HOURS, 0 ),
+		PlannedEEPHoursAim = COALESCE ( PUS.PLANNED_EEP_HOURS, UQA.PLANNED_EEP_HOURS, 0 ),
+		PlannedTotalTLevelHoursAim = COALESCE ( PUS.PLANNED_HOURS, UQA.PLANNED_HOURS, 0 ),
+		PlannedYearlyTLevelHoursAim = CAST ( COALESCE ( PUS.PLANNED_HOURS, UQA.PLANNED_HOURS, 0 ) AS FLOAT ) / CAST ( 2 AS FLOAT ),
+		NumDays = 
+			DATEDIFF ( 
+				DAY, 
+				COALESCE ( PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ),
+				COALESCE ( 
+					CASE
+						WHEN PU.PROGRESS_STATUS = 'A' THEN NULL
+						ELSE PU.PROGRESS_DATE
+					END, 
+					PUS.AIM_END, 
+					PUS.END_DATE, 
+					UIO.FES_END_DATE,
+					UQA.END_DATE
+				)
+			),
+		TrainingConsultant1StaffRef = CAST ( CON.TrainingConsultant1StaffRef AS VARCHAR(50) ),
+		TrainingConsultant1StaffName = CON.TrainingConsultant1StaffName,
+		TrainingConsultant2StaffRef = CAST ( CON.TrainingConsultant2StaffRef AS VARCHAR(50) ),
+		TrainingConsultant2StaffName = CON.TrainingConsultant2StaffName,
+		BusinessDevelopmentStaffRef = CAST ( CON.BusinessDevelopmentStaffRef AS VARCHAR(50) ),
+		BusinessDevelopmentStaffName = CON.BusinessDevelopmentStaffName,
+		ApplicationUserDefined01 = PU.USER_1,
+		ApplicationUserDefined02 = PU.USER_2,
+		ApplicationUserDefined03 = PU.USER_3,
+		ApplicationUserDefined04 = PU.USER_4,
+		ApplicationUserDefined05 = PU.USER_5,
+		ApplicationUserDefined06 = PU.USER_6,
+		ApplicationUserDefined07 = PU.USER_7,
+		ApplicationUserDefined08 = PU.USER_8,
+		ApplicationUserDefined09 = PU.USER_9,
+		ApplicationUserDefined10 = PU.USER_10,
+		ApplicationUserDefined11 = PU.USER_11,
+		ApplicationUserDefined12 = PU.USER_12,
+		ApplicationUserDefined13 = PU.USER_13,
+		ApplicationUserDefined14 = PU.USER_14,
+		ApplicationUserDefined15 = PU.USER_15,
+		ApplicationUserDefined16 = PU.USER_16,
+		ApplicationUserDefined17 = PU.USER_17,
+		ApplicationUserDefined18 = PU.USER_18,
+		ApplicationUserDefined19 = PU.USER_19,
+		ApplicationUserDefined20 = PU.USER_20,
+		ApplicationUserDefined21 = PU.USER_21,
+		ApplicationUserDefined22 = PU.USER_22,
+		ApplicationUserDefined23 = PU.USER_23,
+		ApplicationUserDefined24 = PU.USER_24,
+		ApplicationUserDefined25 = PU.USER_25,
+		ApplicationUserDefined26 = PU.USER_26,
+		ApplicationUserDefined27 = PU.USER_27,
+		ApplicationUserDefined28 = PU.USER_28,
+		ApplicationUserDefined29 = PU.USER_29,
+		ApplicationUserDefined30 = PU.USER_30,
+		ApplicationUserDefined31 = PU.USER_31,
+		ApplicationUserDefined32 = PU.USER_32,
+		ApplicationUserDefined33 = PU.USER_33,
+		ApplicationUserDefined34 = PU.USER_34,
+		ApplicationUserDefined35 = PU.USER_35,
+		ApplicationUserDefined36 = PU.USER_36,
+		ApplicationUserDefined37 = PU.USER_37,
+		ApplicationUserDefined38 = PU.USER_38,
+		ApplicationUserDefined39 = PU.USER_39,
+		ApplicationUserDefined40 = PU.USER_40,
+		ApplicationUserDefined41 = PU.USER_41,
+		ApplicationUserDefined42 = PU.USER_42,
+		ApplicationUserDefined43 = PU.USER_43,
+		ApplicationUserDefined44 = PU.USER_44,
+		ApplicationUserDefined45 = PU.USER_45,
+		ApplicationUserDefined46 = PU.USER_46,
+		ApplicationUserDefined47 = PU.USER_47,
+		ApplicationUserDefined48 = PU.USER_48,
+		ApplicationUserDefined49 = PU.USER_49,
+		ApplicationUserDefined50 = PU.USER_50
+		INTO #Apps
+	FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+	INNER JOIN #CurrentYear CY
+		ON 1 = 1
+	INNER JOIN ebs.dbo.FUNDING_YEARS FY
+		ON FY.FUNDING_YEAR = CY.FundingYear
+	INNER JOIN ebs.dbo.UNIT_INSTANCES UI
+		ON UI.FES_UNIT_INSTANCE_CODE = UIO.FES_UINS_INSTANCE_CODE
+	INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+		ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+	INNER JOIN ebs.dbo.PEOPLE_UNITS PU
+		ON PU.UIO_ID = UIO.UIO_ID
+		AND PU.UNIT_TYPE = 'A'
+	INNER JOIN ebs.dbo.PEOPLE P
+		ON P.PERSON_CODE = PU.PERSON_CODE
+	--INNER JOIN ebs.dbo.ORGANISATION_UNITS FAC
+	--	ON FAC.ORGANISATION_CODE = UIO.OWNING_ORGANISATION
+	--INNER JOIN ebs.dbo.ORGANISATION_UNITS TEAM
+	--	ON TEAM.ORGANISATION_CODE = UIO.OFFERING_ORGANISATION
+	INNER JOIN ebs.dbo.ORGANISATION_UNITS TEAM
+		ON TEAM.ORGANISATION_CODE = UIO.OFFERING_ORGANISATION
+	INNER JOIN ebs.dbo.ORG_UNIT_LINKS LNK
+		ON LNK.SECONDARY_ORGANISATION = TEAM.ORGANISATION_CODE
+	INNER JOIN ebs.dbo.ORGANISATION_UNITS FAC
+		ON FAC.ORGANISATION_CODE = LNK.PRIMARY_ORGANISATION
+	INNER JOIN ebs.dbo.PROGRESS_TYPES STA
+		ON STA.TYPE_CODE = PU.PROGRESS_STATUS
+		AND STA.STUDENT_STATUS = PU.UNIT_TYPE
+	INNER JOIN ebs.dbo.PROGRESS_CODES PC
+		ON PC.TYPE_NAME = PU.PROGRESS_CODE
+	LEFT JOIN ebs.dbo.LSC_YEARLY_VERIFIERS CMP
+		ON CMP.CODE = PU.PROGRESS_CODE
+		AND CMP.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND CMP.DOMAIN = 'COMPST'
+	LEFT JOIN ebs.dbo.LSC_YEARLY_VERIFIERS OC
+		ON OC.CODE = PU.PROGRESS_CODE
+		AND OC.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND OC.DOMAIN = 'PROGRESS'
+	LEFT JOIN ebs.dbo.LOCATIONS LOC
+		ON LOC.LOCATION_CODE = UIO.SLOC_LOCATION_CODE
+	LEFT JOIN ebs.dbo.PEOPLE_UNITS_SPECIAL PUS
+		ON PUS.PEOPLE_UNITS_ID = PU.ID
+		AND PU.SPECIAL_DETAILS = 'Y'
+	LEFT JOIN (
+		SELECT
+			PeopleUnitsID = PUTG.PEOPLE_UNITS_ID,
+			TutorGroupID = PUTG.TUTORGROUP_ID,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						PUTG.PEOPLE_UNITS_ID
+					ORDER BY
+						CASE
+							WHEN CAST ( PUTG.START_DATE AS DATE ) <= CAST ( GETDATE() AS DATE ) THEN 1
+							ELSE 0
+						END,
+						PUTG.START_DATE DESC,
+						PUTG.ID DESC
+				)
+		FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		INNER JOIN ebs.dbo.CALENDAR_OCCURRENCES CAL
+			ON CAL.OCCURRENCE_CODE = UIO.CALOCC_OCCURRENCE_CODE
+		INNER JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+			ON UQA.UIO_ID = UIO.UIO_ID
+			AND UQA.DEFAULT_QA = 'Y'
+		INNER JOIN ebs.dbo.PEOPLE_UNITS PU
+			ON PU.UIO_ID = UIO.UIO_ID
+			AND PU.UNIT_TYPE = 'A'
+		INNER JOIN ebs.dbo.PEOPLE_UNIT_TUTORGROUPS PUTG
+			ON PUTG.PEOPLE_UNITS_ID = PU.ID
+		WHERE
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) PUTG
+		ON PUTG.PeopleUnitsID = PU.ID
+		AND PUTG.RowNum = 1
+	LEFT JOIN ebs.dbo.TUTORGROUPS TUT
+		ON TUT.ID = PUTG.TutorGroupID
+	LEFT JOIN (
+		-- In case of duplicates
+		SELECT
+			AimID = UQA.ID,
+			AimFundingYear = UQA.FUNDING_YEAR,
+			AimCourseID = UQA.UIO_ID,
+			AimIsDefault = UQA.DEFAULT_QA,
+			RowNum = 
+				ROW_NUMBER () OVER (
+					PARTITION BY
+						UQA.FUNDING_YEAR,
+						UQA.UIO_ID
+					ORDER BY
+						UQA.DEFAULT_QA DESC
+				)
+		FROM ebs.dbo.UNIT_INSTANCE_OCCURRENCES UIO
+		INNER JOIN #CurrentYear CY
+			ON 1 = 1
+		INNER JOIN ebs.dbo.FUNDING_YEARS FY
+			ON FY.FUNDING_YEAR = CY.FundingYear
+		INNER JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+			ON UQA.UIO_ID = UIO.UIO_ID
+		WHERE
+			UQA.FUNDING_YEAR = FY.FUNDING_YEAR
+	) UQAM
+		ON UQAM.AimCourseID = UIO.UIO_ID
+		AND UQAM.AimFundingYear = FY.FUNDING_YEAR
+		AND UQAM.RowNum = 1
+	LEFT JOIN ebs.dbo.UIO_QUAL_AIMS UQA
+		ON UQA.ID = UQAM.AimID
+	LEFT JOIN ebs.dbo.FEFC_QUAL_AIMS FQA
+		ON FQA.QUAL_CODE = UQA.QUAL_CODE
+		AND FQA.FUNDING_YEAR = UQA.FUNDING_YEAR
+	LEFT JOIN ebs.dbo.PEOPLE_ADDITIONAL_DETAILS PAD
+		ON PAD.PERSON_CODE = P.PERSON_CODE
+	LEFT JOIN ebs.dbo.PEOPLE_ILR PI
+		ON PI.PERSON_CODE = P.PERSON_CODE
+	LEFT JOIN ebs.dbo.PEOPLE FACO
+		ON FACO.PERSON_CODE = FAC.FES_DEPARTMENT_HEAD
+	LEFT JOIN ebs.dbo.PEOPLE TEAMO
+		ON TEAMO.PERSON_CODE = TEAM.FES_DEPARTMENT_HEAD
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS AIMT
+		ON AIMT.CODE = COALESCE ( PUS.AIM_TYPE, UQA.AIM_TYPE )
+		AND AIMT.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND AIMT.RV_DOMAIN = 'AIM_TYPE'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS ENDR
+		ON ENDR.CODE = PUS.END_REASON
+		AND ENDR.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND ENDR.RV_DOMAIN = 'END_REASON'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS ENDRY
+		ON ENDRY.CODE = ENDR.CODE
+		AND ENDRY.FUNDING_YEAR = ENDR.FUNDING_YEAR
+		AND ENDRY.RV_DOMAIN = 'END_REASON'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS STD
+		ON STD.CODE = COALESCE ( PUS.APPRENTICESHIP_TRAILBLAZER_STD, UQA.APPRENTICESHIP_TRAILBLAZER_STD )
+		AND STD.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND STD.RV_DOMAIN = 'APPRENTICESHIP_TRAILBLAZER_STANDARD'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS FW
+		ON FW.CODE = COALESCE ( PUS.SECTOR_FRAMEWORK, UQA.SECTOR_FRAMEWORK )
+		AND FW.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND FW.RV_DOMAIN = 'SECTOR_FRAMEWORK'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS ETH
+		ON ETH.CODE = COALESCE ( P.ETHNICITY, 99 )
+		AND ETH.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND ETH.RV_DOMAIN = 'ETHNICITY'
+	LEFT JOIN ebs.dbo.LSC_VERIFIERS DIF
+		ON DIF.CODE = COALESCE ( P.LEARN_DIFF, 9 )
+		AND DIF.FUNDING_YEAR = FY.FUNDING_YEAR
+		AND DIF.RV_DOMAIN = 'LEARN_DIFF'
+	LEFT JOIN ebs.dbo.VERIFIERS QT
+		ON QT.LOW_VALUE = UI.FES_QUALIFICATION_TYPE
+		AND QT.RV_DOMAIN = 'QUALIFICATION_TYPE'
+	LEFT JOIN ebs.dbo.VERIFIERS FT
+		ON FT.LOW_VALUE = UI.FES_SOURCE_FINANCE
+		AND FT.RV_DOMAIN = 'SOURCE_FINANCE'
+	LEFT JOIN ebs.dbo.VERIFIERS SEX
+		ON SEX.LOW_VALUE = P.SEX
+		AND SEX.RV_DOMAIN = 'SEX'
+	LEFT JOIN ebs.dbo.VERIFIERS GEN
+		ON GEN.LOW_VALUE = PAD.GENDER
+		AND GEN.RV_DOMAIN = 'GENDER'
+	LEFT JOIN ebs.dbo.MODES_OF_PROVISION MOA
+		ON MOA.MOA_CODE = UIO.FES_MOA_CODE
+	LEFT JOIN #Addresses ADM
+		ON ADM.PersonCode = P.PERSON_CODE
+		AND ADM.RowNum = 1
+	LEFT JOIN ebs.dbo.ADDRESSES AD
+		ON AD.ADDRESS_CODE = ADM.AddressCode
+	LEFT JOIN #Contacts CON
+		ON CON.PersonCode = P.PERSON_CODE
+	LEFT JOIN #Disabilities DIS
+		ON DIS.PersonCode = P.PERSON_CODE
+		AND DIS.RowNum = 1
+	WHERE
+		(
+			--Dates span current year
+			(
+				COALESCE ( PUS.ORIG_LEARN_START_DATE, PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND 
+					CASE
+						WHEN 
+						COALESCE ( 
+							PUS.NVQ_ACHIEVE_DATE,
+							CASE
+								WHEN CMP.LSC_VALUE = '1' THEN NULL
+								ELSE PU.PROGRESS_DATE
+							END
+						) > COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE ) THEN
+							COALESCE ( 
+								PUS.NVQ_ACHIEVE_DATE,
+								CASE
+									WHEN CMP.LSC_VALUE = '1' THEN NULL
+									ELSE PU.PROGRESS_DATE
+								END
+							)
+						ELSE COALESCE ( PUS.AIM_END, PUS.END_DATE, UIO.FES_END_DATE, UQA.END_DATE )
+					END >= CAST ( CY.YrStart AS DATE )
+			)
+			--Or still on programme (from previous year)
+			OR (
+				COALESCE ( PUS.ORIG_LEARN_START_DATE, PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND COALESCE (
+					CMP.LSC_VALUE,
+					9
+				) = 1
+				AND UQA.QUAL_CODE IS NOT NULL --Only include ILR quals for late finishers
+			)
+			--Or on a break in learning (which may be in an earlier year)
+			OR (
+				COALESCE ( PUS.ORIG_LEARN_START_DATE, PUS.AIM_START, PUS.START_DATE, UIO.FES_START_DATE, UQA.START_DATE ) <= CAST ( CY.YrEnd AS DATE )
+				AND COALESCE (
+					CMP.LSC_VALUE,
+					9
+				) = 6
+				AND UQA.QUAL_CODE IS NOT NULL --Only include ILR quals for late finishers
+			)
+		)
+
+		--Exclude dummy courses with 10 year durations
+		--CEILING ( CAST ( DATEDIFF ( MONTH, UIO.FES_START_DATE, UIO.FES_END_DATE ) AS FLOAT ) / CAST ( 12 AS FLOAT ) ) < 10
+
+	--ORDER BY
+	--	P.SURNAME,
+	--	P.FORENAME,
+	--	P.PERSON_CODE,
+	--	UIO.OWNING_ORGANISATION,
+	--	UIO.OFFERING_ORGANISATION,
+	--	UIO.FES_UINS_INSTANCE_CODE,
+	--	UIO.CALOCC_OCCURRENCE_CODE
+
+
+	--Main Aims
+	DROP TABLE IF EXISTS #AppsWithMainAimFlagged
+	SELECT
+		APP.AcademicYearID,
+		APP.YearStart,
+		APP.YearEnd,
+		APP.LearnRefNumber,
+		APP.LearnRefNumberILR,
+		APP.Surname,
+		APP.Forename,
+		APP.DOB,
+		APP.Age31Aug,
+		APP.AgeGroup,
+		APP.ULN,
+		APP.Address1,
+		APP.Address2,
+		APP.Address3,
+		APP.Address4,
+		APP.Address5,
+		APP.Town,
+		APP.County,
+		APP.PostCode,
+		APP.TelMobile,
+		APP.TelHome,
+		APP.EmailCollege,
+		APP.EmailPersonal,
+		APP.EmailOther,
+		APP.EmergencyContact1Name,
+		APP.EmergencyContact1Number,
+		APP.EmergencyContact2Name,
+		APP.EmergencyContact2Number,
+		APP.SexCode,
+		APP.SexName,
+		APP.DeclaredSex,
+		APP.GenderCode,
+		APP.GenderName,
+		APP.Pronouns,
+		APP.JobTitle,
+		APP.EthnicityCode,
+		APP.EthnicityName,
+		APP.EthnicGroup,
+		APP.EthnicGroupSort,
+		APP.FreeSchoolMealsCode,
+		APP.FreeSchoolMealsName,
+		APP.InCare,
+		APP.IsCarer,
+		APP.HasCriminalConvictions,
+		APP.InterviewAssistanceRequired,
+		APP.EHCPCode,
+		APP.EHCPName,
+		APP.HighNeedsCode,
+		APP.HighNeedsName,
+		APP.LearnDifDisCode,
+		APP.LearnDifDisName,
+		APP.LearnDifAssess,
+		APP.MainDifficultyDisabilityCode,
+		APP.MainDifficultyDisabilityName,
+		APP.GCSEMathsGrade,
+		APP.GCSEEnglishGrade,
+		APP.FacultyCode,
+		APP.FacultyName,
+		APP.FacultyHeadStaffCode,
+		APP.FacultyHeadSurname,
+		APP.FacultyHeadForename,
+		APP.FacultyHeadName,
+		APP.TeamCode,
+		APP.TeamName,
+		APP.TeamHeadStaffCode,
+		APP.TeamHeadSurname,
+		APP.TeamHeadForename,
+		APP.TeamHeadName,
+		APP.StudyLocationCode,
+		APP.StudyLocationName,
+		APP.SSA1Code,
+		APP.SSA1Name,
+		APP.SSA2Code,
+		APP.SSA2Name,
+		APP.ApplicationID,
+		APP.ParentID,
+		APP.ParentTitle,
+		APP.CourseID,
+		APP.CourseCode,
+		APP.CourseTitle,
+		APP.OccurrenceCode,
+		APP.GroupCode,
+		APP.LearnAimRef,
+		APP.LearnAimTitle,
+		APP.IsSubcontracted,
+		APP.SubcontractorName,
+		APP.AwardBody,
+		APP.LearningAimTypeCode,
+		APP.LearningAimTypeName,
+		APP.QualTypeCode,
+		APP.QualTypeName,
+		APP.SourceOfFinanceCode,
+		APP.SourceOfFinanceName,
+		APP.ModeOfAttendanceCode,
+		APP.ModeOfAttendanceName,
+		APP.CompletionStatusCode,
+		APP.CompletionStatusName,
+		APP.OutcomeCode,
+		APP.OutcomeName,
+		APP.WithdrawalReasonCode,
+		APP.WithdrawalReasonName,
+		APP.CourseStartDate,
+		APP.CourseEndDate,
+		APP.OriginalStartDate,
+		APP.StartDate,
+		APP.PlannedEndDate,
+		APP.ActualEndDate,
+		APP.AchievementDate,
+		APP.IsPastPlannedEndDate,
+		APP.IncludeInILR,
+		APP.FirstYear,
+		APP.YearNum,
+		APP.OfYears,
+		APP.HybridEndYear,
+		APP.ApplicationStatusCode,
+		APP.ApplicationStatusName,
+		APP.ApplicationStageCode,
+		APP.ApplicationStageName,
+		APP.FundStream,
+		APP.FundSource,
+		APP.IsAdvLearnLoanFunded,
+		APP.ProvisionType,
+		APP.FundModelCode,
+		APP.FundModelName,
+		APP.StandardCode,
+		APP.StandardName,
+		APP.FrameworkCode,
+		APP.FrameworkName,
+		APP.StandardFrameworkCode,
+		APP.StandardFrameworkName,
+		APP.AppPathwayCode,
+		APP.ProgTypeID,
+		APP.AimTypeCode,
+		APP.AimTypeName,
+		APP.NVQLevelCode,
+		APP.NVQLevelName,
+		APP.NVQLevelSort,
+		APP.NVQLevelGroupCode,
+		APP.NVQLevelGroupName,
+		APP.NVQLevelGroupSort,
+		APP.PlannedLearnHoursAim,
+		APP.PlannedEEPHoursAim,
+		APP.PlannedTotalTLevelHoursAim,
+		APP.PlannedYearlyTLevelHoursAim,
+		APP.NumDays,
+		APP.TrainingConsultant1StaffRef,
+		APP.TrainingConsultant1StaffName,
+		APP.TrainingConsultant2StaffRef,
+		APP.TrainingConsultant2StaffName,
+		APP.BusinessDevelopmentStaffRef,
+		APP.BusinessDevelopmentStaffName,
+
+		APP.ApplicationUserDefined01,
+		APP.ApplicationUserDefined02,
+		APP.ApplicationUserDefined03,
+		APP.ApplicationUserDefined04,
+		APP.ApplicationUserDefined05,
+		APP.ApplicationUserDefined06,
+		APP.ApplicationUserDefined07,
+		APP.ApplicationUserDefined08,
+		APP.ApplicationUserDefined09,
+		APP.ApplicationUserDefined10,
+		APP.ApplicationUserDefined11,
+		APP.ApplicationUserDefined12,
+		APP.ApplicationUserDefined13,
+		APP.ApplicationUserDefined14,
+		APP.ApplicationUserDefined15,
+		APP.ApplicationUserDefined16,
+		APP.ApplicationUserDefined17,
+		APP.ApplicationUserDefined18,
+		APP.ApplicationUserDefined19,
+		APP.ApplicationUserDefined20,
+		APP.ApplicationUserDefined21,
+		APP.ApplicationUserDefined22,
+		APP.ApplicationUserDefined23,
+		APP.ApplicationUserDefined24,
+		APP.ApplicationUserDefined25,
+		APP.ApplicationUserDefined26,
+		APP.ApplicationUserDefined27,
+		APP.ApplicationUserDefined28,
+		APP.ApplicationUserDefined29,
+		APP.ApplicationUserDefined30,
+		APP.ApplicationUserDefined31,
+		APP.ApplicationUserDefined32,
+		APP.ApplicationUserDefined33,
+		APP.ApplicationUserDefined34,
+		APP.ApplicationUserDefined35,
+		APP.ApplicationUserDefined36,
+		APP.ApplicationUserDefined37,
+		APP.ApplicationUserDefined38,
+		APP.ApplicationUserDefined39,
+		APP.ApplicationUserDefined40,
+		APP.ApplicationUserDefined41,
+		APP.ApplicationUserDefined42,
+		APP.ApplicationUserDefined43,
+		APP.ApplicationUserDefined44,
+		APP.ApplicationUserDefined45,
+		APP.ApplicationUserDefined46,
+		APP.ApplicationUserDefined47,
+		APP.ApplicationUserDefined48,
+		APP.ApplicationUserDefined49,
+		APP.ApplicationUserDefined50,
+
+		CountAsStart = 
+			CASE
+				WHEN APP.CompletionStatusCode NOT IN ( '1', '2', '3', '6' ) THEN 'N'
+				WHEN APP.CompletionStatusCode = '3' AND APP.WithdrawalReasonCode = 40 THEN 'N' --Ensure transfers do not count when withdrawal reason was used
+				WHEN COALESCE ( APP.AchievementDate, APP.ActualEndDate, APP.PlannedEndDate ) < '20' + LEFT ( APP.AcademicYearID, 2 ) + '-08-01' AND APP.CompletionStatusCode NOT IN ( '1', '6' ) THEN 'N' --Exclude rolled forward for achievement
+				--Add override for OFS Data which will be excluded from ILR if returned to OFS
+				WHEN APP.IncludeInILR = 'N' THEN 'N'
+				WHEN APP.LearnAimRef IS NULL THEN 'N'
+				WHEN APP.CompletionStatusCode = '1' THEN 'Y'
+				WHEN APP.CompletionStatusCode = '2' THEN 'Y' -- Always count completed or continuing aims regardness of durations
+				WHEN APP.CompletionStatusCode = '6' THEN 'Y' --Always count breaks in learning as starts (in case of restats onf less than 42 days)
+				WHEN APP.StartDate IS NULL THEN 'N'
+				WHEN APP.PlannedEndDate IS NULL THEN 'N'
+				WHEN APP.FundSource = '001' THEN 
+					CASE
+						-- HE 1st Nov Rule
+						WHEN APP.ActualEndDate >= '20' + LEFT ( APP.AcademicYearID, 2 ) + '-11-01' THEN 'Y'
+						ELSE 'N'
+					END
+				WHEN APP.FundStream = '99' AND COALESCE ( APP.IsAdvLearnLoanFunded, 'N' ) = 'N' AND APP.CompletionStatusCode = '3' AND DATEDIFF ( d, APP.StartDate, APP.ActualEndDate ) + 1 > 1 THEN 'Y'
+				ELSE
+					CASE
+						WHEN 
+							-- Very Short
+							DATEDIFF ( d, APP.CourseStartDate, APP.CourseEndDate ) + 1 < 14 -- Course duration less than 2 weeks
+							AND (
+								DATEDIFF ( d, PRG.StartDate, PRG.ActualEndDate ) + 1 > 0
+								OR DATEDIFF ( d, APP.StartDate, APP.ActualEndDate ) + 1 > 1 -- Studied at all
+							)
+							THEN 'N' -- No longer counted as per QAR rules
+						WHEN 
+							-- Short
+							DATEDIFF ( d, APP.CourseStartDate, APP.CourseEndDate ) + 1 < 168 -- Course duration less than 24 weeks
+							AND (
+								DATEDIFF ( d, PRG.StartDate, PRG.ActualEndDate ) + 1 >= 14
+								OR DATEDIFF ( d, APP.StartDate, APP.ActualEndDate ) + 1 >= 14 -- Studied at least 2 weeks
+							)
+							THEN 'Y'
+						WHEN 
+							-- Long
+							DATEDIFF ( d, APP.CourseStartDate, APP.CourseEndDate ) + 1 >= 168 -- Course duration 24 weeks +
+							AND (
+								DATEDIFF ( d, PRG.StartDate, PRG.ActualEndDate ) + 1 >= 42
+								OR DATEDIFF ( d, APP.StartDate, APP.ActualEndDate ) + 1 >= 42 -- Studied at least 6 weeks
+							)
+							THEN 'Y'
+						ELSE 'N'
+					END
+			END,
+		RowNum = 
+			ROW_NUMBER () OVER (
+				PARTITION BY
+					APP.LearnRefNumber
+				ORDER BY
+					APP.IncludeInILR DESC,
+					CASE
+						WHEN APP.LearnAimRef IS NOT NULL THEN 1
+						ELSE 2
+					END,
+					APP.IsPastPlannedEndDate,
+					APP.CompletionStatusCode,
+					CASE
+						--Make main aim the real learning aim within an apprenticeship so can include NVQ Level etc
+						WHEN APP.LearnAimRef = 'ZPROG001' THEN 2
+						ELSE 1
+					END,
+					APP.ProgTypeID,
+					CASE
+						WHEN APP.AimTypeCode = 1 THEN 1 --Programme Aim
+						WHEN APP.AimTypeCode = 5 THEN 2 --Core Aim
+						ELSE 3
+					END,
+					CASE
+						WHEN APP.LearningAimTypeCode IN (
+							'0003', --GCSE
+							'1439' --Functional Skills
+						) THEN 2
+						ELSE 1
+					END,
+					APP.NVQLevelSort DESC,
+					APP.PlannedLearnHoursAim + APP.PlannedEEPHoursAim + APP.PlannedTotalTLevelHoursAim DESC,
+					DATEDIFF ( DAY, APP.StartDate, COALESCE ( APP.ActualEndDate, APP.PlannedEndDate ) ) DESC,
+					APP.StartDate,
+					APP.ApplicationID
+			)
+		INTO #AppsWithMainAimFlagged
+	FROM #Apps APP
+	LEFT JOIN (
+		SELECT
+			LearnRefNumber = APP.LearnRefNumber,
+			StartDate = MIN ( APP.StartDate ),
+			PlannedEndDate = MAX ( APP.PlannedEndDate ),
+			ActualEndDate = MAX ( APP.ActualEndDate )
+		FROM #Apps APP
+		WHERE
+			APP.FundStream = '25'
+			AND APP.IncludeInILR = 'Y'
+			AND APP.CompletionStatusCode IN ( '1', '2', '3' )
+		GROUP BY
+			APP.LearnRefNumber
+	) PRG
+		ON PRG.LearnRefNumber = APP.LearnRefNumber
+
+
+
+
+	--Delete Existing Data for Academic Year
+	DELETE APP
+	FROM EBSReporting.dbo.Application APP
+	WHERE
+		APP.AcademicYearID = @AcademicYear
+
+	--DROP TABLE IF EXISTS EBSReporting.dbo.Application
+	
+	--Main Query
+	INSERT INTO EBSReporting.dbo.Application
+	SELECT
+		APP.AcademicYearID,
+		APP.YearStart,
+		APP.YearEnd,
+		RefreshDate = GETDATE(),
+		APP.LearnRefNumber,
+		APP.Surname,
+		APP.Forename,
+		APP.DOB,
+		APP.Age31Aug,
+		APP.AgeGroup,
+		APP.ULN,
+		APP.Address1,
+		APP.Address2,
+		APP.Address3,
+		APP.Address4,
+		APP.Address5,
+		APP.Town,
+		APP.County,
+		APP.PostCode,
+		APP.TelMobile,
+		APP.TelHome,
+		APP.EmailCollege,
+		APP.EmailPersonal,
+		APP.EmailOther,
+		APP.EmergencyContact1Name,
+		APP.EmergencyContact1Number,
+		APP.EmergencyContact2Name,
+		APP.EmergencyContact2Number,
+		APP.SexCode,
+		APP.SexName,
+		APP.DeclaredSex,
+		APP.GenderCode,
+		APP.GenderName,
+		APP.Pronouns,
+		APP.JobTitle,
+		APP.EthnicityCode,
+		APP.EthnicityName,
+		APP.EthnicGroup,
+		APP.EthnicGroupSort,
+		APP.FreeSchoolMealsCode,
+		APP.FreeSchoolMealsName,
+		APP.InCare,
+		APP.IsCarer,
+		APP.HasCriminalConvictions,
+		APP.InterviewAssistanceRequired,
+		APP.EHCPCode,
+		APP.EHCPName,
+		APP.HighNeedsCode,
+		APP.HighNeedsName,
+		APP.LearnDifDisCode,
+		APP.LearnDifDisName,
+		APP.LearnDifAssess,
+		APP.MainDifficultyDisabilityCode,
+		APP.MainDifficultyDisabilityName,
+		APP.GCSEMathsGrade,
+		APP.GCSEEnglishGrade,
+		APP.FacultyCode,
+		APP.FacultyName,
+		APP.FacultyHeadStaffCode,
+		APP.FacultyHeadSurname,
+		APP.FacultyHeadForename,
+		APP.FacultyHeadName,
+		APP.TeamCode,
+		APP.TeamName,
+		APP.TeamHeadStaffCode,
+		APP.TeamHeadSurname,
+		APP.TeamHeadForename,
+		APP.TeamHeadName,
+		APP.StudyLocationCode,
+		APP.StudyLocationName,
+		APP.SSA1Code,
+		APP.SSA1Name,
+		APP.SSA2Code,
+		APP.SSA2Name,
+		APP.ApplicationID,
+		APP.ParentID,
+		APP.ParentTitle,
+		APP.CourseID,
+		APP.CourseCode,
+		APP.CourseTitle,
+		APP.OccurrenceCode,
+		APP.GroupCode,
+		APP.LearnAimRef,
+		APP.LearnAimTitle,
+		APP.IsSubcontracted,
+		APP.SubcontractorName,
+		APP.AwardBody,
+		APP.LearningAimTypeCode,
+		APP.LearningAimTypeName,
+		APP.QualTypeCode,
+		APP.QualTypeName,
+		APP.SourceOfFinanceCode,
+		APP.SourceOfFinanceName,
+		APP.ModeOfAttendanceCode,
+		APP.ModeOfAttendanceName,
+		APP.CompletionStatusCode,
+		APP.CompletionStatusName,
+		APP.OutcomeCode,
+		APP.OutcomeName,
+		APP.WithdrawalReasonCode,
+		APP.WithdrawalReasonName,
+		APP.CourseStartDate,
+		APP.CourseEndDate,
+		APP.OriginalStartDate,
+		APP.StartDate,
+		APP.PlannedEndDate,
+		APP.ActualEndDate,
+		APP.AchievementDate,
+		APP.IsPastPlannedEndDate,
+		APP.IncludeInILR,
+		APP.FirstYear,
+		APP.YearNum,
+		APP.OfYears,
+		APP.HybridEndYear,
+		APP.ApplicationStatusCode,
+		APP.ApplicationStatusName,
+		APP.ApplicationStageCode,
+		APP.ApplicationStageName,
+		APP.FundStream,
+		APP.FundSource,
+		APP.IsAdvLearnLoanFunded,
+		APP.ProvisionType,
+		APP.FundModelCode,
+		APP.FundModelName,
+		APP.StandardCode,
+		APP.StandardName,
+		APP.FrameworkCode,
+		APP.FrameworkName,
+		APP.StandardFrameworkCode,
+		APP.StandardFrameworkName,
+		APP.AppPathwayCode,
+		APP.ProgTypeID,
+		APP.AimTypeCode,
+		APP.AimTypeName,
+		APP.NVQLevelCode,
+		APP.NVQLevelName,
+		APP.NVQLevelSort,
+		APP.NVQLevelGroupCode,
+		APP.NVQLevelGroupName,
+		APP.NVQLevelGroupSort,
+		APP.PlannedLearnHoursAim,
+		APP.PlannedEEPHoursAim,
+		APP.PlannedTotalTLevelHoursAim,
+		APP.PlannedYearlyTLevelHoursAim,
+		APP.NumDays,
+		APP.TrainingConsultant1StaffRef,
+		APP.TrainingConsultant1StaffName,
+		APP.TrainingConsultant2StaffRef,
+		APP.TrainingConsultant2StaffName,
+		APP.BusinessDevelopmentStaffRef,
+		APP.BusinessDevelopmentStaffName,
+
+		APP.ApplicationUserDefined01,
+		APP.ApplicationUserDefined02,
+		APP.ApplicationUserDefined03,
+		APP.ApplicationUserDefined04,
+		APP.ApplicationUserDefined05,
+		APP.ApplicationUserDefined06,
+		APP.ApplicationUserDefined07,
+		APP.ApplicationUserDefined08,
+		APP.ApplicationUserDefined09,
+		APP.ApplicationUserDefined10,
+		APP.ApplicationUserDefined11,
+		APP.ApplicationUserDefined12,
+		APP.ApplicationUserDefined13,
+		APP.ApplicationUserDefined14,
+		APP.ApplicationUserDefined15,
+		APP.ApplicationUserDefined16,
+		APP.ApplicationUserDefined17,
+		APP.ApplicationUserDefined18,
+		APP.ApplicationUserDefined19,
+		APP.ApplicationUserDefined20,
+		APP.ApplicationUserDefined21,
+		APP.ApplicationUserDefined22,
+		APP.ApplicationUserDefined23,
+		APP.ApplicationUserDefined24,
+		APP.ApplicationUserDefined25,
+		APP.ApplicationUserDefined26,
+		APP.ApplicationUserDefined27,
+		APP.ApplicationUserDefined28,
+		APP.ApplicationUserDefined29,
+		APP.ApplicationUserDefined30,
+		APP.ApplicationUserDefined31,
+		APP.ApplicationUserDefined32,
+		APP.ApplicationUserDefined33,
+		APP.ApplicationUserDefined34,
+		APP.ApplicationUserDefined35,
+		APP.ApplicationUserDefined36,
+		APP.ApplicationUserDefined37,
+		APP.ApplicationUserDefined38,
+		APP.ApplicationUserDefined39,
+		APP.ApplicationUserDefined40,
+		APP.ApplicationUserDefined41,
+		APP.ApplicationUserDefined42,
+		APP.ApplicationUserDefined43,
+		APP.ApplicationUserDefined44,
+		APP.ApplicationUserDefined45,
+		APP.ApplicationUserDefined46,
+		APP.ApplicationUserDefined47,
+		APP.ApplicationUserDefined48,
+		APP.ApplicationUserDefined49,
+		APP.ApplicationUserDefined50,
+
+		APP.CountAsStart,
+		IsMainApplication = 
+			CASE
+				WHEN APP.RowNum = 1 THEN 'Y'
+				ELSE 'N'
+			END,
+		APP.RowNum
+		--INTO EBSReporting.dbo.Application
+	FROM #AppsWithMainAimFlagged APP
+	--WHERE
+	--	APP.LearnRefNumber = '104544'
+	--WHERE
+	--	APP.RowNum = 1
+		--AND APP.CountAsStart = 'Y'
+
+
+	--Add Indexes
+	--ALTER TABLE EBSReporting.dbo.Application
+	--	ALTER COLUMN AcademicYearID VARCHAR(5) NOT NULL
+
+	--ALTER TABLE EBSReporting.dbo.Application
+	--	ALTER COLUMN ApplicationID INT NOT NULL;
+
+	--ALTER TABLE EBSReporting.dbo.Application
+	--	ADD CONSTRAINT PK_Application_AcademicYearIDApplicationID PRIMARY KEY CLUSTERED (AcademicYearID, ApplicationID);
+END
