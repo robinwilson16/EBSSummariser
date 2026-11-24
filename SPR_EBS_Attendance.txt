@@ -60,6 +60,15 @@ BEGIN
 		SessionBreak = RES.[BREAK],
 		DurationIncBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ),
 		DurationExcBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ) - RES.[BREAK],
+		MarkTypeID = USG.ID,
+		MarkTypeCode = USG.USAGE_CODE,
+		MarkTypeName = USG.DESCRIPTION,
+		MarkTypeIsPositive = USG.IS_POSITIVE,
+		MarkTypeIsAbsent = USG.IS_ABSENT,
+		MarkTypeIsLate = USG.IS_LATE,
+		MarkTypeIsLeftEarly = USG.IS_LEFT_EARLY,
+		MarkTypeBGColour = USG.BG_COLOUR,
+		MarkTypeIsDefault = USG.IS_DEFAULT_USAGE,
 		PlannedSession = 
 			CASE
 				WHEN COALESCE ( USG.IS_POSITIVE, '' ) = '~' THEN 0 -- Ignore neutral marks
@@ -234,7 +243,7 @@ BEGIN
 		--AND RE.ID = 44338
 		--AND P.PERSON_CODE = 115516
 
---Delete Existing Data for Academic Year
+	--Delete Existing Data for Academic Year
 	DELETE ATT
 	FROM EBSReporting.dbo.Attendance ATT
 	WHERE
