@@ -31,6 +31,147 @@ BEGIN
 		AND CAST ( FY.END_DATE AS DATE ) >= '20' + LEFT ( @AcademicYear, 2 ) + '-08-01'
 
 
+	DROP TABLE IF EXISTS #Weeks
+	SELECT
+		AcademicYear = @AcademicYear,
+		WeekPatternID = WK.WeekPatternID,
+		WeekPatternCode = WK.WeekPatternCode,
+		WeekStart = WK.WeekStart,
+		WeekEnd = WK.WeekEnd,
+		AcademicWeekNum = WK.AcademicWeekNum,
+		IsTeachingWeek = WK.IsTeachingWeek,
+		TeachingWeekNum = 
+			CASE
+				WHEN WK.TeachingWeekNum = LAG ( WK.TeachingWeekNum, 1 ) OVER ( ORDER BY WK.WeekPatternID, WK.AcademicWeekNum ) THEN 0
+				ELSE WK.TeachingWeekNum
+			END,
+		IsCurrentWeek = 
+			CASE
+				WHEN
+					CAST ( GETDATE() AS DATE ) >= WK.WeekStart
+					AND CAST ( GETDATE() AS DATE ) <= WK.WeekEnd 
+					THEN 'Y'
+				ELSE 'N'
+			END
+		INTO #Weeks
+	FROM (
+		SELECT
+			WeekPatternID = WK.WeekPatternID,
+			WeekPatternCode = WK.WeekPatternCode,
+			WeekStart = WK.WeekStart,
+			WeekEnd = WK.WeekEnd,
+			AcademicWeekNum = WK.AcademicWeekNum,
+			TeachingWeekNum = 
+				SUM ( WK.IsTeachingWeek ) OVER ( 
+					PARTITION BY
+						WK.WeekPatternID
+					ORDER BY 
+						WK.AcademicWeekNum 
+				),
+			IsTeachingWeek = CASE WHEN WK.IsTeachingWeek = 1 THEN 'Y' ELSE 'N' END
+		FROM (
+			SELECT
+				WeekPatternID = WP.WeekPatternID,
+				WeekPatternCode = WP.WeekPatternCode,
+				WeekStart = WK.WeekStart,
+				WeekEnd = WK.WeekEnd,
+				AcademicWeekNum = WK.WeekNum,
+				IsTeachingWeek = CAST ( SUBSTRING ( WP.WeekPattern, WK.WeekNum, 1 ) AS INT )
+			FROM (
+				SELECT
+					YrStart = MD.YrStart,
+					YrEnd = MD.YrEnd,
+					WeekStart = MD.WeekStart,
+					WeekEnd = DATEADD ( DAY, 6, MD.WeekStart ),
+					WeekNum = 
+						ROW_NUMBER() OVER (
+							ORDER BY 
+								MD.WeekStart
+						)
+				FROM (
+					SELECT
+						YrStart = CY.YrStart,
+						YrEnd = CY.YrEnd,
+						WeekStart = DATEADD ( DAY, OBJ.RowNum - 1, CY.YrStart )
+					FROM (
+							SELECT
+								OBJ.object_id,
+								RowNum =
+									ROW_NUMBER () OVER (
+										ORDER BY
+											OBJ.object_id
+									)
+							FROM sys.all_objects OBJ
+						) OBJ
+					INNER JOIN #CurrentYear CY
+						ON 1 = 1
+					WHERE 
+						DATEPART ( DW, DATEADD ( DAY, OBJ.RowNum - 1, CY.YrStart ) ) = 1 --Only include first day of week
+						AND DATEADD ( DAY, OBJ.RowNum - 1, CY.YrStart ) <= CY.YrEnd
+				) MD
+			) WK
+			LEFT JOIN (
+				SELECT
+					WeekPatternID = WP.ID,
+					WeekPatternCode = WP.PATTERN_CODE,
+					WeekPattern = WP.WEEK_PATTERN
+				FROM ebs.dbo.SESSIONS SES
+				INNER JOIN #CurrentYear CY
+					ON 1 = 1
+				INNER JOIN ebs.dbo.REGISTER_WEEK_PATTERNS WP
+					ON WP.SESSION_CODE = SES.SESSION_CODE
+				WHERE
+					CAST ( SES.START_DATE AS DATE ) <= CY.YrEnd
+					AND CAST ( SES.END_DATE AS DATE ) >= CY.YrStart
+			) WP
+				ON 1 = 1
+		) WK
+	) WK
+	--ORDER BY
+	--	WK.WeekPatternCode,
+	--	WK.WeekStart
+
+
+	--Week Numbers
+	DROP TABLE IF EXISTS #WeekNumbers
+	SELECT
+		AcademicYear = @AcademicYear,
+		WeekPatternID = WK.WeekPatternID,
+		WeekPatternCode = WK.WeekPatternCode,
+		WeekStart = WK.WeekStart,
+		WeekEnd = WK.WeekEnd,
+		AcademicWeekNum = WK.AcademicWeekNum,
+		IsTeachingWeek = WK.IsTeachingWeek,
+		TeachingWeekNum = WK.TeachingWeekNum,
+		IsCurrentWeek = WK.IsCurrentWeek,
+		IsMostRecentTeachingWeek = 
+			CASE
+				WHEN WKCL.AcademicWeekNum = WK.AcademicWeekNum THEN 'Y'
+				ELSE 'N'
+			END,
+		CurrentWeekNum = WKC.AcademicWeekNum,
+		MostRecentTeachingWeekNum = WKCL.TeachingWeekNum
+		INTO #WeekNumbers
+	FROM #Weeks WK
+	LEFT JOIN #Weeks WKC
+		ON WKC.WeekPatternID = WK.WeekPatternID
+		AND WKC.IsCurrentWeek = 'Y' --Left Join as only works for current year
+	LEFT JOIN #Weeks WKCL
+		ON WKCL.WeekPatternID = WKC.WeekPatternID
+		AND WKCL.AcademicWeekNum = (
+			SELECT
+				MAX ( WKM.AcademicWeekNum )
+			FROM #Weeks WKM
+			WHERE
+				WKM.WeekPatternID = WKCL.WeekPatternID
+				AND WKM.IsTeachingWeek = 'Y'
+				AND WKM.AcademicWeekNum <= WKC.AcademicWeekNum
+		)
+	--ORDER BY
+	--	WK.WeekPatternCode,
+	--	WK.WeekStart
+
+
 	--Attendance Info
 	DROP TABLE IF EXISTS #Attend
 	SELECT
@@ -60,6 +201,16 @@ BEGIN
 		SessionBreak = RES.[BREAK],
 		DurationIncBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ),
 		DurationExcBreaks = DATEDIFF ( MINUTE, RES.STARTDATE, RES.ENDDATE ) - RES.[BREAK],
+		WeekPatternCode = WN.WeekPatternCode,
+		WeekStart = WN.WeekStart,
+		WeekEnd = WN.WeekEnd,
+		AcademicWeekNum = WN.AcademicWeekNum,
+		IsTeachingWeek = WN.IsTeachingWeek,
+		TeachingWeekNum = WN.TeachingWeekNum,
+		IsCurrentWeek = WN.IsCurrentWeek,
+		IsMostRecentTeachingWeek = WN.IsMostRecentTeachingWeek,
+		CurrentWeekNum = WN.CurrentWeekNum,
+		MostRecentTeachingWeekNum = WN.MostRecentTeachingWeekNum,
 		MarkTypeID = USG.ID,
 		MarkTypeCode = USG.USAGE_CODE,
 		MarkTypeName = USG.DESCRIPTION,
@@ -226,6 +377,22 @@ BEGIN
 	LEFT JOIN ebs.dbo.FEFC_QUAL_AIMS FQA
 		ON FQA.QUAL_CODE = UQA.QUAL_CODE
 		AND FQA.FUNDING_YEAR = UQA.FUNDING_YEAR
+	LEFT JOIN #WeekNumbers WN
+		ON WN.WeekStart <= CAST ( COALESCE ( LS.ACTUAL_START_DATE, LS.PLANNED_START_DATE ) AS DATE )
+		AND WN.WeekEnd >= CAST ( COALESCE ( LS.ACTUAL_START_DATE, LS.PLANNED_START_DATE ) AS DATE )
+		AND WN.WeekPatternID = 
+			COALESCE ( 
+				RE.REGISTER_WEEK_PATTERNS_ID,
+				(
+					--Default Pattern
+					SELECT
+						WP.ID
+					FROM ebs.dbo.REGISTER_WEEK_PATTERNS WP
+					WHERE
+						WP.SESSION_CODE = SES.SESSION_CODE
+						AND WP.DEFAULT_PATTERN = 'Y'
+				)
+			)
 	WHERE
 		(
 			--Dates span current year
@@ -242,6 +409,7 @@ BEGIN
 		AND ENR.PersonCode IS NOT NULL --Has to be enrolled
 		--AND RE.ID = 44338
 		--AND P.PERSON_CODE = 115516
+
 
 	--Delete Existing Data for Academic Year
 	DELETE ATT
@@ -277,6 +445,16 @@ BEGIN
 		ATT.SessionBreak,
 		ATT.DurationIncBreaks,
 		ATT.DurationExcBreaks,
+		ATT.WeekPatternCode,
+		ATT.WeekStart,
+		ATT.WeekEnd,
+		ATT.AcademicWeekNum,
+		ATT.IsTeachingWeek,
+		ATT.TeachingWeekNum,
+		ATT.IsCurrentWeek,
+		ATT.IsMostRecentTeachingWeek,
+		ATT.CurrentWeekNum,
+		ATT.MostRecentTeachingWeekNum,
 		ATT.MarkTypeID,
 		ATT.MarkTypeCode,
 		ATT.MarkTypeName,
