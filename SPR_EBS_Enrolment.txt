@@ -175,6 +175,7 @@ BEGIN
 		LearnRefNumberILR = COALESCE ( P.FES_SEC_PERSON_CODE, CAST ( P.PERSON_CODE AS VARCHAR(50) ) ),
 		Surname = P.SURNAME,
 		Forename = P.FORENAME,
+		PreferredFirstName = P.KNOWN_AS,
 		DOB = P.DATE_OF_BIRTH,
 		Age31Aug = 
 			CASE
@@ -1174,6 +1175,7 @@ BEGIN
 		ENR.LearnRefNumberILR,
 		ENR.Surname,
 		ENR.Forename,
+		ENR.PreferredFirstName,
 		ENR.DOB,
 		ENR.Age31Aug,
 		ENR.AgeGroup,
@@ -1535,6 +1537,7 @@ BEGIN
 		ENR.LearnRefNumberILR,
 		ENR.Surname,
 		ENR.Forename,
+		ENR.PreferredFirstName,
 		ENR.DOB,
 		ENR.Age31Aug,
 		ENR.AgeGroup,
